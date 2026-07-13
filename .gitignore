@@ -1,0 +1,35 @@
+# ── ROS2 빌드 산출물 ──────────────────────────────────
+build/
+install/
+log/
+
+# ── 외부 저장소 (직접 커밋하지 않습니다) ──────────────
+# 아래 두 패키지는 우리 코드가 아니라 외부 의존성입니다.
+# README 의 "설치" 절차대로 각자 git clone 하세요.
+src/doosan-robot2/
+src/dsr_study/
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+
+# ── Jupyter ───────────────────────────────────────────
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# ── 실험 산출물 (용량 큼 · 저장소에 넣지 마세요) ──────
+captures/
+*.bag
+*.db3
+*.mp4
+
+# ── IDE / OS ──────────────────────────────────────────
+.vscode/
+.idea/
+.claude/settings.local.json
+*.swp
+.DS_Store
