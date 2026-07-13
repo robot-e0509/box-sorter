@@ -1,5 +1,6 @@
-# 두산 E0509 협동로봇을 이용한 OCR 기반 적응형 파지 물류 분류 시스템
+![적응형 파지 물류 분류 로봇](docs/thumbnail.png)
 
+# 두산 E0509 협동로봇을 이용한 OCR 기반 적응형 파지 물류 분류 시스템
 
 두산 **E0509** 로봇팔과 **RH-P12-RN(A)** 그리퍼로, 상자에 붙은 라벨(**서울 / 수원 / 경기**)을
 카메라로 읽고 해당 목적지로 옮기는 물류 분류 시스템입니다.
@@ -8,8 +9,6 @@
 ![시스템 구조](docs/architecture.png)
 
 > 다이어그램 원본: [`docs/architecture.excalidraw`](docs/architecture.excalidraw)
-> — [excalidraw.com](https://excalidraw.com) 에 붙여넣거나 드래그해서 열면 수정할 수 있습니다.
-> 고친 뒤에는 PNG 도 다시 내보내 주세요 (Export image → PNG → `docs/architecture.png`).
 
 > **현재 상태**: 로봇 연결 확인 단계입니다.
 > 각 팀이 자기 폴더에서 작업한 뒤 나중에 합칠 예정이라, 아직 공용 코드는 없습니다.

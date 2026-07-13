@@ -31,6 +31,18 @@ source install/setup.bash
 > 저장소 용량이 약 400MB 입니다. 두산 드라이버(`doosan-robot2`)의 3D 메시 파일이 큽니다.
 > clone 이 좀 오래 걸려도 정상입니다.
 
+### 빌드할 때 빨간 글씨가 잔뜩 나오는데, 에러인가요?
+
+**아닙니다.** 대부분 두산 코드에서 나오는 경고입니다. **맨 마지막 줄만** 보세요.
+
+```
+Summary: 31 packages finished       ← 성공
+  7 packages had stderr output      ← 경고일 뿐, 무시
+```
+
+`Failed` 나 `Aborted` 가 없으면 성공입니다.
+(colcon 은 경고도 에러도 똑같이 빨갛게 보여줍니다.)
+
 ### 저장소에 포함된 외부 패키지
 
 | 패키지 | 출처 | 버전 |
@@ -116,6 +128,7 @@ jupyter notebook          # ← 반드시 source 한 이 터미널에서
 
 | 증상 | 원인 / 해결 |
 |------|-------------|
+| 빌드 중 빨간 글씨가 잔뜩 나옴 | 대부분 경고입니다. 마지막 줄에 `Summary: N packages finished` 가 있으면 성공 → [설명](#빌드할-때-빨간-글씨가-잔뜩-나오는데-에러인가요) |
 | `Package 'dsr_gripper' not found`<br>`ModuleNotFoundError: DR_init` | 그 터미널에서 `source install/setup.bash` 안 함. **터미널마다 매번** 해야 합니다 |
 | 로봇 서버가 안 붙음 | `ping 110.120.1.68` 부터. 유선 연결·공유기 확인 |
 | `set_robot_mode` → "service not available"<br>`NameError: SetSingularityHandlingForce` | `DSR_ROBOT2.py` 가 두산 원본으로 덮여씀. 저장소 버전으로 되돌리세요:<br>`git checkout src/doosan-robot2/dsr_common2/imp/DSR_ROBOT2.py` |
