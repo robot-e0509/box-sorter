@@ -11,33 +11,37 @@
 
 ## 설치
 
-`src/` 아래 두 패키지는 **외부 저장소**입니다. 우리 저장소에 커밋하지 않고 따로 받습니다.
+외부 패키지(두산 공식 드라이버, 그리퍼 서비스)가 저장소에 **함께 들어 있습니다.**
+따로 clone 하거나 패치할 필요 없이, 받아서 빌드만 하면 됩니다.
 
 ```bash
-# 1. 우리 저장소 (ROS 관례상 워크스페이스 폴더명은 doosan_ws 로 받습니다)
+# 1. 받기 (ROS 관례상 워크스페이스 폴더명은 doosan_ws 로)
 cd ~
 git clone https://github.com/robot-e0509/box-sorter.git doosan_ws
-cd doosan_ws/src
+cd doosan_ws
 
-# 2. 외부 패키지 (두산 공식 드라이버 + 그리퍼 서비스)
-git clone -b jazzy https://github.com/doosan-robotics/doosan-robot2.git
-git clone https://github.com/pinklab-art/dsr_study.git
-
-# 3. 의존 패키지 설치
-cd ~/doosan_ws
+# 2. 의존 패키지 설치
 rosdep install --from-paths src --ignore-src -r -y
 
-# 4. ★ DSR_ROBOT2.py 패치 (안 하면 로봇 연결이 실패합니다)
-cp src/dsr_study/DSR_ROBOT2.py src/doosan-robot2/dsr_common2/imp/DSR_ROBOT2.py
-
-# 5. 빌드
+# 3. 빌드 (5~10분 걸립니다)
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-> **4번을 빼먹으면** `set_robot_mode` 가 "service not available" 로 죽습니다.
-> 두산 원본의 서비스 접두사 누락 + 클래스명 오타를 고친 파일입니다.
-> 자세한 내용은 [dsr_study README](https://github.com/pinklab-art/dsr_study) 참고.
+> 저장소 용량이 약 400MB 입니다. 두산 드라이버(`doosan-robot2`)의 3D 메시 파일이 큽니다.
+> clone 이 좀 오래 걸려도 정상입니다.
+
+### 저장소에 포함된 외부 패키지
+
+| 패키지 | 출처 | 버전 |
+|--------|------|------|
+| `src/doosan-robot2` | [doosan-robotics/doosan-robot2](https://github.com/doosan-robotics/doosan-robot2) | jazzy · `816ecb5` |
+| `src/dsr_study` | [pinklab-art/dsr_study](https://github.com/pinklab-art/dsr_study) | main · `61f45e0` |
+
+`doosan-robot2` 의 `DSR_ROBOT2.py` 는 **패치가 적용된 상태**로 들어 있습니다.
+두산 원본에는 서비스 접두사 누락(`_srv_name_prefix = ''`)과 클래스명 오타
+(`SetSingularityHandlingForce`) 버그가 있어서, 그대로 쓰면 로봇 연결이 실패합니다.
+`dsr_study` 의 수정본으로 덮어쓴 것이니 **다시 패치하지 마세요.**
 
 ## 실행
 
@@ -114,8 +118,7 @@ jupyter notebook          # ← 반드시 source 한 이 터미널에서
 |------|-------------|
 | `Package 'dsr_gripper' not found`<br>`ModuleNotFoundError: DR_init` | 그 터미널에서 `source install/setup.bash` 안 함. **터미널마다 매번** 해야 합니다 |
 | 로봇 서버가 안 붙음 | `ping 110.120.1.68` 부터. 유선 연결·공유기 확인 |
-| `set_robot_mode` → "service not available" | DSR_ROBOT2.py 패치 안 함 → 설치 4번 |
-| `NameError: SetSingularityHandlingForce` | 같은 원인 → 설치 4번 |
+| `set_robot_mode` → "service not available"<br>`NameError: SetSingularityHandlingForce` | `DSR_ROBOT2.py` 가 두산 원본으로 덮여씀. 저장소 버전으로 되돌리세요:<br>`git checkout src/doosan-robot2/dsr_common2/imp/DSR_ROBOT2.py` |
 | 그리퍼가 반응 없음 | `gripper_service` 가 안 떠 있음. 로봇이 **auto 모드 + STANDBY** 인지 확인 |
 | 그리퍼가 이상하게 동작 | `gripper_service` 가 **두 개** 떠 있을 수 있음 → `ros2 node list \| grep gripper` |
 | 상자가 미끄러짐 | `current` 를 올리세요 |

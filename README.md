@@ -21,6 +21,31 @@
 처음 합류했다면 이 문서를 위에서부터 따라 하세요.
 설치, 로봇 연결, 그리퍼 제어, 주피터 실행, 자주 겪는 문제가 다 들어 있습니다.
 
+두산 드라이버와 그리퍼 패키지가 **저장소에 함께 들어 있어서**, 받아서 빌드만 하면 됩니다.
+따로 clone 하거나 패치할 필요 없습니다. (대신 clone 이 좀 느립니다 — 약 400MB)
+
+```bash
+git clone https://github.com/robot-e0509/box-sorter.git doosan_ws
+cd doosan_ws && colcon build --symlink-install && source install/setup.bash
+```
+
+## 저장소 구조
+
+```
+doosan_ws/
+├── docs/
+│   ├── RUN.md                    설치 · 실행 · 트러블슈팅
+│   └── architecture.excalidraw   시스템 구조 다이어그램 (수정용 원본)
+├── notebooks/
+│   └── 00_robot_connect.ipynb    로봇 연결 · 좌표 확인
+└── src/
+    ├── doosan-robot2/            [외부] 두산 공식 ROS2 드라이버
+    │                             DSR_ROBOT2.py 패치 적용됨 — 건드리지 마세요
+    ├── dsr_study/                [외부] RH-P12-RN 그리퍼 서비스
+    │
+    └── (여기에 각 팀 폴더를 만듭니다)
+```
+
 ## 프로젝트 목표
 
 | 단계 | 내용 |
@@ -46,6 +71,13 @@
 ## 협업 규칙
 
 각 팀은 `src/` 아래에 **자기 폴더를 만들어** 작업합니다. 합치는 건 나중에 합니다.
+`main` 에 직접 push 하지 말고 브랜치 → PR 로 올려주세요.
+
+```bash
+git switch -c feat/ocr-easyocr        # feat/ fix/ docs/ exp/
+git commit -m "feat(ocr): EasyOCR 로 한글 라벨 인식"
+git push -u origin feat/ocr-easyocr   # → 깃헙에서 PR
+```
 
 **로봇은 한 명씩 씁니다.** 두 명이 동시에 명령을 보내면 섞여서 위험합니다.
 자세한 안전 수칙은 [RUN.md](docs/RUN.md#안전) 참고.
@@ -55,5 +87,6 @@
 `.gitignore` 가 막아주지만 `git status` 로 한 번 더 확인하세요.
 
 - `build/`, `install/`, `log/` — 빌드 산출물 (1.1GB. `colcon build` 로 다시 만들어집니다)
-- `src/doosan-robot2/`, `src/dsr_study/` — 외부 저장소 (각자 clone 합니다)
 - 사진·영상 원본 — 용량이 큽니다. 구글 드라이브에 올리고 링크만 공유하세요.
+- `src/doosan-robot2/`, `src/dsr_study/` — 외부 패키지. 저장소에 들어 있지만
+  **우리가 고칠 일은 없습니다.** 여기를 수정한 커밋이 올라오면 리뷰에서 막아주세요.
