@@ -20,6 +20,11 @@ venv/
 .ipynb_checkpoints/
 *-checkpoint.ipynb
 
+# ── 깃헙 org 아바타 (저장소 코드가 아님) ──────────────
+# 깃헙 org Settings → Profile 에 업로드하고 끝내는 이미지라 추적하지 않습니다.
+docs/avatar.png
+docs/gen_avatar.py
+
 # ── 실험 산출물 (용량 큼 · 저장소에 넣지 마세요) ──────
 # 상자 사진, 실험 영상 등은 구글 드라이브에 올리고 링크만 공유하세요.
 captures/
