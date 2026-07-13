@@ -1,0 +1,7 @@
+# GripperCmd.srv  (제어 전용 — 피드백 없음)
+# 요청
+int32 position      # 목표 stroke: 0 = 완전 닫힘, 750 = 완전 열림
+int32 current       # 힘(전류) 제한. 0이면 노드 기본값 사용
+---
+# 응답
+bool  success       # DrlStart 실행 성공 여부
