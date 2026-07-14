@@ -31,6 +31,7 @@ from doosan_client import (
     DEFAULT_ROBOT_MODEL,
     DOOSAN_WS,
     DoosanClient,
+    TARGET_Z_UP_MM,
 )
 
 # ---------------------------------------------------------------------------
@@ -48,8 +49,9 @@ ACC_XY = 40.0
 ACC_ORI = 40.0
 
 Z_OFFSET_MM = 0.0
-ORI_MODE = "keep"
-FIXED_ORI_DEG = [0.0, 180.0, 0.0]
+# 그리퍼 tip 기준 + 하향(정자세). keep 사용 시 교정 후에도 목표 ori가 흔들릴 수 있음
+ORI_MODE = "fixed"
+FIXED_ORI_DEG = [0.0, 180.0, 0.0]  # doosan_client.GRIPPER_DOWN_ORI_DEG 와 동일
 
 # e0509 대략 작업 공간 (베이스 기준, mm) — 벗어나면 이동 거부
 WORKSPACE_MIN_MM = np.array([-700.0, -700.0, 50.0])
@@ -268,7 +270,8 @@ class ClickAndMoveApp:
         clicked = self.state["clicked"]
         if not clicked or not clicked.get("valid"):
             return None
-        x, y, z = clicked["base_mm"]
+        x, y, z_surf = clicked["base_mm"]
+        z = float(z_surf) + float(TARGET_Z_UP_MM)
         if ORI_MODE == "fixed":
             rx, ry, rz = FIXED_ORI_DEG
         else:
@@ -325,13 +328,15 @@ class ClickAndMoveApp:
             actual = None
             err = None
             try:
-                print("[앱] movel 스레드 시작")
-                ok = self.robot.movel(
-                    target,
+                print("[앱] 그리퍼 TCP·하향 교정 후 movel (Z 이미 보정됨)")
+                ok = self.robot.movel_gripper(
+                    target[:3],
                     vel=[VEL_XY, VEL_ORI],
                     acc=[ACC_XY, ACC_ORI],
+                    straighten_first=True,
+                    z_up_mm=0.0,
                 )
-                print(f"[앱] movel 반환 ok={ok}")
+                print(f"[앱] movel_gripper 반환 ok={ok}")
                 if ok:
                     actual = self.robot.get_posx_mm_deg()
                     if actual is not None:
@@ -465,7 +470,10 @@ def main() -> None:
         robot_model=ROBOT_MODEL,
         ws=DOOSAN_WS,
     )
-    robot_ok = robot.connect_and_set_autonomous()
+    robot_ok = robot.connect_and_set_autonomous(
+        setup_gripper=True,
+        straighten_down=True,
+    )
     if not robot_ok:
         print("로봇 없이 좌표 표시만 진행합니다. (실행 버튼 비활성)")
         robot = None

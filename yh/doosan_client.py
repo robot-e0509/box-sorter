@@ -26,6 +26,60 @@ ROBOT_MODE_AUTONOMOUS = 1
 DR_BASE = 0
 DR_MV_MOD_ABS = 0
 
+# ---------------------------------------------------------------------------
+# 그리퍼 TCP (플랜지 → RH-P12-RN tip)
+# dsr_study README: E0509 + ROBOTIS RH-P12-RN(A) 플랜지 직결
+# TCP pos = [x,y,z,rx,ry,rz] (mm, deg), 플랜지 좌표계 기준
+# Z는 실측 손가락 tip까지 거리로 조정하세요.
+# ---------------------------------------------------------------------------
+GRIPPER_TCP_NAME = "rh_p12_rn"
+GRIPPER_TCP_POS = [0.0, 0.0, 152.0, 0.0, 0.0, 0.0] #154 -> 152
+# 감지된 표면 Z보다 tip을 이만큼 위로 (그리퍼 높이 감안, mm)
+# 기본값 = TCP Z(=그리퍼 길이). 더/덜 올리고 싶으면 여기만 조정.
+GRIPPER_HEIGHT_MM = float(GRIPPER_TCP_POS[2])
+TARGET_Z_UP_MM = GRIPPER_HEIGHT_MM
+# 두산 기본 ZYZ: [0, 180, 0] ≈ 툴(그리퍼)이 바닥을 향함 (dsr_tests movel 예제와 동일)
+GRIPPER_DOWN_ORI_DEG = [0.0, 180.0, 0.0]
+ORI_TOL_DEG = 5.0
+# 기동 전 기본자세 (조인트 deg, J1..J6)
+HOME_POSJ_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+HOME_POSJ_TOL_DEG = 2.0
+# 컨투어 yaw → posx: True면 [yaw, 180, 0], False면 [0, 180, yaw]
+GRIPPER_YAW_ON_RX = False
+GRIPPER_YAW_SIGN = 1.0
+# 짧은 변 집기용. 이미지→base 변환 후에도 ±90이 더 맞으면 여기 조정.
+GRIPPER_YAW_OFFSET_DEG = 90.0
+
+# RH-P12-RN stroke (dsr_gripper): 0=완전닫힘, 750=완전열림
+GRIPPER_POS_OPEN = 750
+GRIPPER_POS_CLOSE = 0
+GRIPPER_POS_HALF = 375  # 커스텀닫기 기본 = 반만 닫힘
+GRIPPER_CURRENT_OPEN = 200
+GRIPPER_CURRENT_CLOSE = 300
+GRIPPER_CURRENT_CUSTOM = 250
+GRIPPER_CMD_TIMEOUT_S = 20.0
+# 손가락 기구 정착 대기 (열기/닫기 서비스 응답 후, 이동 전)
+GRIPPER_SETTLE_S = 4.0
+
+
+def normalize_yaw_deg(yaw: float) -> float:
+    y = float(yaw)
+    while y > 180.0:
+        y -= 360.0
+    while y <= -180.0:
+        y += 360.0
+    return y
+
+
+def gripper_ori_with_yaw(yaw_deg: float) -> list[float]:
+    """하향 자세 유지 + yaw(컨투어 각도) 적용한 posx ori [rx,ry,rz]."""
+    yaw = normalize_yaw_deg(
+        float(GRIPPER_YAW_SIGN) * float(yaw_deg) + float(GRIPPER_YAW_OFFSET_DEG)
+    )
+    if GRIPPER_YAW_ON_RX:
+        return [yaw, float(GRIPPER_DOWN_ORI_DEG[1]), float(GRIPPER_DOWN_ORI_DEG[2])]
+    return [float(GRIPPER_DOWN_ORI_DEG[0]), float(GRIPPER_DOWN_ORI_DEG[1]), yaw]
+
 
 def _ensure_doosan_ws_pythonpath(ws: Path = DOOSAN_WS) -> None:
     """doosan_ws install 의 Python/라이브러리 경로를 프로세스에 주입."""
@@ -106,16 +160,33 @@ class DoosanClient:
     service_prefix: str = ""
     _cli_set_mode: Any = field(default=None, repr=False)
     _cli_get_posx: Any = field(default=None, repr=False)
+    _cli_get_posj: Any = field(default=None, repr=False)
     _cli_movel: Any = field(default=None, repr=False)
+    _cli_movej: Any = field(default=None, repr=False)
     _cli_set_control: Any = field(default=None, repr=False)
+    _cli_add_tcp: Any = field(default=None, repr=False)
+    _cli_set_tcp: Any = field(default=None, repr=False)
+    _cli_get_tcp: Any = field(default=None, repr=False)
+    _cli_gripper: Any = field(default=None, repr=False)
     _rclpy: Any = field(default=None, repr=False)
     _executor: Any = field(default=None, repr=False)
     _spin_thread: Any = field(default=None, repr=False)
     _SetRobotMode: Any = field(default=None, repr=False)
     _GetCurrentPosx: Any = field(default=None, repr=False)
+    _GetCurrentPosj: Any = field(default=None, repr=False)
     _MoveLine: Any = field(default=None, repr=False)
+    _MoveJoint: Any = field(default=None, repr=False)
     _SetRobotControl: Any = field(default=None, repr=False)
+    _ConfigCreateTcp: Any = field(default=None, repr=False)
+    _SetCurrentTcp: Any = field(default=None, repr=False)
+    _GetCurrentTcp: Any = field(default=None, repr=False)
+    _GripperCmd: Any = field(default=None, repr=False)
     _lock: Any = field(default_factory=threading.Lock, repr=False)
+    gripper_ready: bool = False
+    # 커스텀 닫기 stroke (0=완전닫힘 ~ 750=완전열림). 기본=반만 닫힘
+    custom_close_pos: int = GRIPPER_POS_HALF
+    custom_close_current: int = GRIPPER_CURRENT_CUSTOM
+    robot_mode: int = ROBOT_MODE_AUTONOMOUS
 
     def _wait_future(self, future, timeout_s: float):
         """executor가 spin 중이므로 future.done()만 기다림."""
@@ -137,8 +208,13 @@ class DoosanClient:
             import rclpy
             from rclpy.executors import MultiThreadedExecutor
             from dsr_msgs2.srv import (
+                ConfigCreateTcp,
+                GetCurrentPosj,
                 GetCurrentPosx,
+                GetCurrentTcp,
+                MoveJoint,
                 MoveLine,
+                SetCurrentTcp,
                 SetRobotControl,
                 SetRobotMode,
             )
@@ -156,8 +232,25 @@ class DoosanClient:
         self._rclpy = rclpy
         self._SetRobotMode = SetRobotMode
         self._GetCurrentPosx = GetCurrentPosx
+        self._GetCurrentPosj = GetCurrentPosj
         self._MoveLine = MoveLine
+        self._MoveJoint = MoveJoint
         self._SetRobotControl = SetRobotControl
+        self._ConfigCreateTcp = ConfigCreateTcp
+        self._SetCurrentTcp = SetCurrentTcp
+        self._GetCurrentTcp = GetCurrentTcp
+
+        # 손가락 그리퍼 서비스 (dsr_gripper) — bringup과 별도 노드
+        try:
+            from dsr_gripper_interfaces.srv import GripperCmd
+
+            self._GripperCmd = GripperCmd
+        except ImportError:
+            self._GripperCmd = None
+            print(
+                "[로봇] dsr_gripper_interfaces 없음 — "
+                "손가락 열기/닫기 버튼은 비활성될 수 있습니다."
+            )
 
         try:
             if not rclpy.ok():
@@ -215,11 +308,26 @@ class DoosanClient:
                     self._cli_get_posx = self.node.create_client(
                         GetCurrentPosx, _srv("aux_control/get_current_posx")
                     )
+                    self._cli_get_posj = self.node.create_client(
+                        GetCurrentPosj, _srv("aux_control/get_current_posj")
+                    )
                     self._cli_movel = self.node.create_client(
                         MoveLine, _srv("motion/move_line")
                     )
+                    self._cli_movej = self.node.create_client(
+                        MoveJoint, _srv("motion/move_joint")
+                    )
                     self._cli_set_control = self.node.create_client(
                         SetRobotControl, _srv("system/set_robot_control")
+                    )
+                    self._cli_add_tcp = self.node.create_client(
+                        ConfigCreateTcp, _srv("tcp/config_create_tcp")
+                    )
+                    self._cli_set_tcp = self.node.create_client(
+                        SetCurrentTcp, _srv("tcp/set_current_tcp")
+                    )
+                    self._cli_get_tcp = self.node.create_client(
+                        GetCurrentTcp, _srv("tcp/get_current_tcp")
                     )
                     print(f"[로봇] 서비스 발견: /{self.robot_id}/{set_mode_srv}")
                     break
@@ -232,8 +340,105 @@ class DoosanClient:
             self.close()
             return False
 
+        # 손가락 그리퍼: /dsr01/gripper/cmd (gripper_service 노드)
+        if self._GripperCmd is not None:
+            grip_srv = f"/{self.robot_id}/gripper/cmd"
+            self._cli_gripper = self.node.create_client(self._GripperCmd, grip_srv)
+            if self._cli_gripper.wait_for_service(timeout_sec=1.0):
+                print(f"[로봇] 그리퍼 서비스 발견: {grip_srv}")
+            else:
+                print(
+                    f"[로봇] 그리퍼 서비스 대기 중: {grip_srv}\n"
+                    "       → ros2 run dsr_gripper gripper_service"
+                )
+
         self.connected = True
         return True
+
+    def gripper_service_ready(self, timeout_s: float = 0.5) -> bool:
+        if self._cli_gripper is None or self._GripperCmd is None:
+            return False
+        return bool(self._cli_gripper.wait_for_service(timeout_sec=timeout_s))
+
+    def gripper_cmd(
+        self,
+        position: int,
+        current: int = GRIPPER_CURRENT_CUSTOM,
+        timeout_s: float = GRIPPER_CMD_TIMEOUT_S,
+        *,
+        settle_s: Optional[float] = None,
+    ) -> bool:
+        """
+        RH-P12-RN stroke 명령.
+        position: 0=완전닫힘 ~ 750=완전열림 (dsr_gripper 규약)
+        settle_s: 성공 후 정착 대기(초). None이면 GRIPPER_SETTLE_S.
+                  이동 전에 반드시 열기/닫기가 끝나도록 기본 대기.
+        """
+        if not self.connected or self._cli_gripper is None or self._GripperCmd is None:
+            print("[로봇] gripper_cmd: 클라이언트 없음 (dsr_gripper 패키지/연결 확인)")
+            return False
+        if not self._cli_gripper.wait_for_service(timeout_sec=3.0):
+            print(
+                "[로봇] /{}/gripper/cmd 서비스 없음 → "
+                "'ros2 run dsr_gripper gripper_service' 실행 여부 확인".format(
+                    self.robot_id
+                )
+            )
+            return False
+        pos = int(max(0, min(750, int(position))))
+        cur = int(max(0, int(current)))
+        with self._lock:
+            req = self._GripperCmd.Request()
+            req.position = pos
+            req.current = cur
+            future = self._cli_gripper.call_async(req)
+            result = self._wait_future(future, timeout_s)
+        ok = result is not None and bool(getattr(result, "success", False))
+        print(
+            f"[로봇] gripper_cmd(pos={pos}, current={cur}) "
+            f"{'OK' if ok else 'FAIL'}"
+        )
+        if ok:
+            wait = float(GRIPPER_SETTLE_S if settle_s is None else settle_s)
+            if wait > 0:
+                print(f"[로봇] 그리퍼 정착 대기 {wait:.1f}s (이후 이동 가능)")
+                time.sleep(wait)
+        return ok
+
+    def gripper_open(
+        self,
+        current: int = GRIPPER_CURRENT_OPEN,
+        *,
+        settle_s: Optional[float] = None,
+    ) -> bool:
+        return self.gripper_cmd(GRIPPER_POS_OPEN, current, settle_s=settle_s)
+
+    def gripper_close(
+        self,
+        current: int = GRIPPER_CURRENT_CLOSE,
+        *,
+        settle_s: Optional[float] = None,
+    ) -> bool:
+        return self.gripper_cmd(GRIPPER_POS_CLOSE, current, settle_s=settle_s)
+
+    def gripper_custom_close(self, *, settle_s: Optional[float] = None) -> bool:
+        """설정의 커스텀 닫기 stroke로 이동 (기본=반만 닫힘 375)."""
+        return self.gripper_cmd(
+            int(self.custom_close_pos),
+            int(self.custom_close_current),
+            settle_s=settle_s,
+        )
+
+    def set_custom_close(
+        self, position: int, current: Optional[int] = None
+    ) -> None:
+        self.custom_close_pos = int(max(0, min(750, int(position))))
+        if current is not None:
+            self.custom_close_current = int(max(0, int(current)))
+        print(
+            f"[로봇] 커스텀닫기 설정: pos={self.custom_close_pos} "
+            f"(0닫힘~750열림), current={self.custom_close_current}"
+        )
 
     def set_mode(self, mode: int) -> bool:
         if not self.connected or self._cli_set_mode is None:
@@ -246,9 +451,24 @@ class DoosanClient:
         ok = result is not None and bool(result.success)
         label = "MANUAL" if mode == ROBOT_MODE_MANUAL else "AUTONOMOUS"
         if ok:
+            self.robot_mode = int(mode)
             print(f"[로봇] 모드 → {label}")
         else:
             print(f"[로봇] set_robot_mode({label}) 실패 result={result}")
+        return ok
+
+    def is_manual_mode(self) -> bool:
+        return int(self.robot_mode) == ROBOT_MODE_MANUAL
+
+    def set_manual_mode(self) -> bool:
+        """펜던트/직접교시용 MANUAL. 자동 movel/movej 는 앱에서 막습니다."""
+        return self.set_mode(ROBOT_MODE_MANUAL)
+
+    def set_autonomous_mode(self, servo: bool = True) -> bool:
+        """앱 자동 이동용 AUTONOMOUS."""
+        ok = self.set_mode(ROBOT_MODE_AUTONOMOUS)
+        if ok and servo:
+            self.servo_on()
         return ok
 
     def servo_on(self) -> bool:
@@ -282,24 +502,329 @@ class DoosanClient:
         print("       펜던트 조그 또는 플랜지 직접교시로 자세를 잡으세요.")
         return True
 
-    def connect_and_set_autonomous(self, timeout_s: float = 20.0) -> bool:
+    def connect_and_set_autonomous(
+        self,
+        timeout_s: float = 20.0,
+        *,
+        setup_gripper: bool = True,
+        straighten_down: bool = True,
+    ) -> bool:
         if not self.connect(timeout_s=timeout_s, node_name="click_and_move_dsr"):
             return False
         if not self.set_mode(ROBOT_MODE_AUTONOMOUS):
             self.close()
             return False
         self.servo_on()
+
+        if setup_gripper:
+            if not self.ensure_gripper_tcp():
+                print("[로봇] 경고: 그리퍼 TCP 설정 실패 — flange 기준으로 동작할 수 있습니다.")
+            else:
+                self.gripper_ready = True
+
         # 연결 직후 pose 한 번 읽어 통신 확인
         pos = self.get_posx_mm_deg()
         if pos is not None:
             print(
-                "[로봇] 현재 pose: "
+                "[로봇] 현재 pose(TCP): "
                 f"[{pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}, "
                 f"{pos[3]:.1f}, {pos[4]:.1f}, {pos[5]:.1f}]"
             )
         else:
             print("[로봇] 경고: 현재 pose를 읽지 못했습니다.")
+
+        # 기동 직후: 기본 조인트 자세로 교정한 뒤 이후 이동 허용
+        if straighten_down:
+            print(
+                "[로봇] 기동 전 자세 교정: 기본자세 "
+                + "["
+                + ", ".join(f"{v:.0f}" for v in HOME_POSJ_DEG)
+                + "] deg (J1..J6)..."
+            )
+            if not self.go_home_posj():
+                print("[로봇] 경고: 기본자세 교정 실패 — 수동으로 자세를 확인하세요.")
+            else:
+                print("[로봇] 기본자세 교정 완료 — 이동 준비됨")
         return True
+
+    def _srv_path(self, name: str) -> str:
+        if self.service_prefix:
+            return f"{self.service_prefix}/{name}"
+        return name
+
+    def get_tcp_name(self) -> Optional[str]:
+        if not self.connected or self._cli_get_tcp is None:
+            return None
+        if not self._cli_get_tcp.wait_for_service(timeout_sec=1.0):
+            print("[로봇] tcp/get_current_tcp 서비스 없음")
+            return None
+        with self._lock:
+            req = self._GetCurrentTcp.Request()
+            future = self._cli_get_tcp.call_async(req)
+            result = self._wait_future(future, self.service_timeout_s)
+        if result is None:
+            return None
+        if not bool(getattr(result, "success", True)):
+            return None
+        info = getattr(result, "info", None)
+        if info is None:
+            return None
+        return str(info)
+
+    def add_tcp(self, name: str, pos: list[float]) -> bool:
+        """플랜지 기준 TCP 등록 (config_create_tcp). 이미 있으면 False일 수 있음."""
+        if not self.connected or self._cli_add_tcp is None:
+            return False
+        if not self._cli_add_tcp.wait_for_service(timeout_sec=2.0):
+            print("[로봇] tcp/config_create_tcp 서비스 없음")
+            return False
+        with self._lock:
+            req = self._ConfigCreateTcp.Request()
+            req.name = str(name)
+            req.pos = [float(v) for v in pos[:6]]
+            future = self._cli_add_tcp.call_async(req)
+            result = self._wait_future(future, self.service_timeout_s)
+        ok = result is not None and bool(getattr(result, "success", False))
+        print(
+            f"[로봇] add_tcp('{name}', {[round(v, 1) for v in pos[:6]]}) "
+            f"{'OK' if ok else 'FAIL/이미존재'}"
+        )
+        return ok
+
+    def set_tcp(self, name: str) -> bool:
+        """현재 TCP 선택 (set_current_tcp). 이후 posx/movel 이 이 TCP 기준."""
+        if not self.connected or self._cli_set_tcp is None:
+            return False
+        if not self._cli_set_tcp.wait_for_service(timeout_sec=2.0):
+            print("[로봇] tcp/set_current_tcp 서비스 없음")
+            return False
+        with self._lock:
+            req = self._SetCurrentTcp.Request()
+            req.name = str(name)
+            future = self._cli_set_tcp.call_async(req)
+            result = self._wait_future(future, self.service_timeout_s)
+        ok = result is not None and bool(getattr(result, "success", False))
+        print(f"[로봇] set_tcp('{name}') {'OK' if ok else 'FAIL'}")
+        return ok
+
+    def ensure_gripper_tcp(
+        self,
+        name: str = GRIPPER_TCP_NAME,
+        pos: Optional[list[float]] = None,
+    ) -> bool:
+        """
+        그리퍼 tip TCP 등록·활성.
+        posx / movel 목표가 플랜지가 아닌 그리퍼 기준으로 동작하게 합니다.
+        """
+        if pos is None:
+            pos = list(GRIPPER_TCP_POS)
+        # 이미 같은 TCP면 재설정만
+        cur = self.get_tcp_name()
+        if cur is not None:
+            print(f"[로봇] 현재 TCP: '{cur}'")
+        self.add_tcp(name, pos)  # 이미 있어도 실패할 수 있음 → set 은 계속
+        ok = self.set_tcp(name)
+        if ok:
+            after = self.get_tcp_name()
+            print(f"[로봇] 활성 TCP(그리퍼): '{after or name}'")
+        return ok
+
+    @staticmethod
+    def _angle_diff_deg(a: float, b: float) -> float:
+        d = abs(float(a) - float(b)) % 360.0
+        return min(d, 360.0 - d)
+
+    def ori_close(
+        self,
+        ori_a: list[float],
+        ori_b: list[float],
+        tol_deg: float = ORI_TOL_DEG,
+    ) -> bool:
+        """두 Euler 자세가 허용각 이내인지 (ry ±180 동등 표현 허용)."""
+        if len(ori_a) < 3 or len(ori_b) < 3:
+            return False
+        rx_ok = self._angle_diff_deg(ori_a[0], ori_b[0]) <= tol_deg
+        rz_ok = self._angle_diff_deg(ori_a[2], ori_b[2]) <= tol_deg
+        ry_a, ry_b = float(ori_a[1]), float(ori_b[1])
+        ry_ok = (
+            self._angle_diff_deg(ry_a, ry_b) <= tol_deg
+            or self._angle_diff_deg(ry_a, -ry_b) <= tol_deg
+        )
+        return rx_ok and ry_ok and rz_ok
+
+    def is_gripper_down(
+        self,
+        posx: Optional[list[float]] = None,
+        tol_deg: float = ORI_TOL_DEG,
+    ) -> bool:
+        if posx is None:
+            posx = self.get_posx_mm_deg()
+        if posx is None or len(posx) < 6:
+            return False
+        return self.ori_close(posx[3:6], list(GRIPPER_DOWN_ORI_DEG), tol_deg)
+
+    def rotate_gripper_to(
+        self,
+        ori_deg: list[float],
+        vel: Optional[list[float]] = None,
+        acc: Optional[list[float]] = None,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """
+        현재 TCP XYZ는 유지하고 그리퍼(자세)만 목표 ori로 맞춤.
+        이미 가까우면 생략(True). 완료 후 잠시 정착 대기.
+        """
+        cur = self.get_posx_mm_deg()
+        if cur is None or len(cur) < 6:
+            print("[로봇] rotate_gripper_to: pose 읽기 실패")
+            return False
+        ori = [float(v) for v in ori_deg[:3]]
+        if not force and self.ori_close(cur[3:6], ori):
+            print("[로봇] 이미 목표 그리퍼 자세 — 회전 생략")
+            return True
+        rot_pose = [
+            float(cur[0]),
+            float(cur[1]),
+            float(cur[2]),
+            ori[0],
+            ori[1],
+            ori[2],
+        ]
+        print(
+            "[로봇] 그리퍼 자세 조정 (위치 고정) → "
+            f"ori=[{ori[0]:.1f}, {ori[1]:.1f}, {ori[2]:.1f}]"
+        )
+        if vel is None:
+            vel = [30.0, 30.0]
+        if acc is None:
+            acc = [30.0, 30.0]
+        ok = self.movel(rot_pose, vel=vel, acc=acc)
+        if ok:
+            time.sleep(0.15)
+        return ok
+
+    def is_at_home_posj(
+        self,
+        posj: Optional[list[float]] = None,
+        tol_deg: float = HOME_POSJ_TOL_DEG,
+    ) -> bool:
+        if posj is None:
+            posj = self.get_posj_deg()
+        if posj is None or len(posj) < 6:
+            return False
+        for i in range(6):
+            if self._angle_diff_deg(float(posj[i]), float(HOME_POSJ_DEG[i])) > tol_deg:
+                return False
+        return True
+
+    def go_home_posj(
+        self,
+        vel: float = 25.0,
+        acc: float = 25.0,
+        force: bool = False,
+    ) -> bool:
+        """
+        기동/복귀용 기본 조인트 자세로 movej.
+        HOME_POSJ_DEG = [0, 0, 90, 0, 90, 0] (J1..J6, deg).
+        이미 기본자세면 True (이동 생략).
+        """
+        home = [float(v) for v in HOME_POSJ_DEG]
+        if not force and self.is_at_home_posj():
+            print("[로봇] 이미 기본 조인트 자세")
+            return True
+        print(
+            "[로봇] 기본자세 교정 → "
+            + ", ".join(f"J{i+1}={home[i]:.1f}" for i in range(6))
+        )
+        return self.movej(home, vel=vel, acc=acc)
+
+    def orient_gripper_down(
+        self,
+        vel: Optional[list[float]] = None,
+        acc: Optional[list[float]] = None,
+        force: bool = False,
+    ) -> bool:
+        """현재 TCP XYZ는 유지하고 자세만 하향(정자세)으로 교정."""
+        return self.rotate_gripper_to(
+            list(GRIPPER_DOWN_ORI_DEG), vel=vel, acc=acc, force=force
+        )
+
+    def movel_gripper(
+        self,
+        xyz_mm: list[float],
+        *,
+        vel: Optional[list[float]] = None,
+        acc: Optional[list[float]] = None,
+        straighten_first: bool = True,
+        z_up_mm: Optional[float] = None,
+        ori_deg: Optional[list[float]] = None,
+        yaw_deg: Optional[float] = None,
+        rotate_first: bool = True,
+        phase_cb: Optional[Any] = None,
+    ) -> bool:
+        """
+        그리퍼 tip + 목표 자세로 이동.
+        순서 (rotate_first=True):
+          1) 자세가 다르면 현재 위치에서 그리퍼만 조정 (완료 대기)
+          2) 그 다음 목표 XYZ로 직선 이동
+        """
+        if vel is None:
+            vel = [40.0, 40.0]
+        if acc is None:
+            acc = [40.0, 40.0]
+
+        lift = float(TARGET_Z_UP_MM if z_up_mm is None else z_up_mm)
+        z_cmd = float(xyz_mm[2]) + lift
+        if ori_deg is not None:
+            ori = [float(v) for v in ori_deg[:3]]
+        elif yaw_deg is not None:
+            ori = gripper_ori_with_yaw(float(yaw_deg))
+        else:
+            ori = [float(v) for v in GRIPPER_DOWN_ORI_DEG]
+
+        do_rotate = bool(rotate_first or straighten_first)
+        if do_rotate:
+            cur = self.get_posx_mm_deg()
+            need = True
+            if cur is not None and len(cur) >= 6:
+                need = not self.ori_close(cur[3:6], ori)
+            if need:
+                if phase_cb is not None:
+                    try:
+                        phase_cb("rotate")
+                    except Exception:
+                        pass
+                print("[로봇] 1/2 그리퍼 자세 조정 → 이후 XYZ 이동")
+                if not self.rotate_gripper_to(ori, vel=vel, acc=acc):
+                    print("[로봇] movel_gripper: 그리퍼 자세 조정 실패")
+                    return False
+            else:
+                print("[로봇] 1/2 그리퍼 자세 이미 일치 — 바로 이동")
+
+        target = [
+            float(xyz_mm[0]),
+            float(xyz_mm[1]),
+            z_cmd,
+            ori[0],
+            ori[1],
+            ori[2],
+        ]
+        if phase_cb is not None:
+            try:
+                phase_cb("move")
+            except Exception:
+                pass
+        print(
+            f"[로봇] Z 보정: surface={float(xyz_mm[2]):.1f} + lift={lift:.1f} "
+            f"→ tip_Z={z_cmd:.1f} mm"
+        )
+        print(
+            "[로봇] 2/2 목표 XYZ 이동 → "
+            f"[{target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f}, "
+            f"{target[3]:.1f}, {target[4]:.1f}, {target[5]:.1f}]"
+        )
+        return self.movel(target, vel=vel, acc=acc)
 
     def get_posx_mm_deg(self) -> Optional[list[float]]:
         if not self.connected or self._cli_get_posx is None:
@@ -325,6 +850,73 @@ class DoosanClient:
         if len(data) < 6:
             return None
         return [float(x) for x in data[:6]]
+
+    def get_posj_deg(self) -> Optional[list[float]]:
+        """현재 조인트각 [J1..J6] deg."""
+        if not self.connected or self._cli_get_posj is None:
+            return None
+        if not self._cli_get_posj.wait_for_service(timeout_sec=1.0):
+            print("[로봇] get_current_posj 서비스 없음")
+            return None
+        with self._lock:
+            req = self._GetCurrentPosj.Request()
+            future = self._cli_get_posj.call_async(req)
+            result = self._wait_future(future, self.service_timeout_s)
+        if result is None or not bool(getattr(result, "success", False)):
+            print("[로봇] get_current_posj 실패")
+            return None
+        try:
+            pos = [float(x) for x in list(result.pos)[:6]]
+        except Exception as exc:
+            print(f"[로봇] posj 파싱 실패: {exc}")
+            return None
+        if len(pos) < 6:
+            return None
+        return pos
+
+    def movej(
+        self,
+        posj_deg: list[float],
+        vel: float = 30.0,
+        acc: float = 30.0,
+    ) -> bool:
+        """관절 공간 이동 (절대각, deg). posj = [J1..J6]."""
+        if not self.connected or self._cli_movej is None:
+            print("[로봇] movej: 미연결")
+            return False
+        if not self._cli_movej.wait_for_service(timeout_sec=2.0):
+            print("[로봇] motion/move_joint 서비스 없음")
+            return False
+        if not self.set_mode(ROBOT_MODE_AUTONOMOUS):
+            print("[로봇] AUTONOMOUS 전환 실패 — movej 중단")
+            return False
+
+        req = self._MoveJoint.Request()
+        req.pos = [float(v) for v in posj_deg[:6]]
+        req.vel = float(vel)
+        req.acc = float(acc)
+        req.time = 0.0
+        req.radius = 0.0
+        req.mode = DR_MV_MOD_ABS
+        req.blend_type = 0
+        req.sync_type = 0
+
+        print(
+            "[로봇] movej 요청 → "
+            + ", ".join(f"J{i+1}={req.pos[i]:.1f}" for i in range(6))
+            + f"  vel={req.vel} acc={req.acc}"
+        )
+        with self._lock:
+            future = self._cli_movej.call_async(req)
+            result = self._wait_future(future, self.move_timeout_s)
+        if result is None:
+            print("[로봇] movej 타임아웃/무응답")
+            return False
+        if not result.success:
+            print("[로봇] movej 거부됨 (success=False)")
+            return False
+        print("[로봇] movej 완료 (success=True)")
+        return True
 
     def movel(
         self,
