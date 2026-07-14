@@ -14,19 +14,23 @@
 
 이 스크립트도 같은 setup.bash 를 source 한 뒤 실행.
 
-조작
-  s : 보드 검출 + pose 저장
-  c : 캘리브레이션 계산
-  d : 마지막 샘플 삭제
-  q / Esc : 종료
+조작 (tkinter GUI — OpenCV highgui 불필요)
+  [저장] : 보드 검출 시 현재 프레임 + pose 저장
+  [삭제] : 마지막 샘플 삭제
+  [캘리브] : 샘플로 cam2base 계산
+  [종료] : 종료
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import math
+import threading
+import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from tkinter import messagebox, simpledialog, ttk
 
 import cv2
 import numpy as np
@@ -305,39 +309,37 @@ def parse_posx(text: str) -> list[float] | None:
         return None
 
 
-def ask_posx() -> list[float] | None:
-    print()
-    print("펜던트 현재 posx를 입력하세요.")
-    print("예: 400.0 0.0 300.0 0.0 180.0 0.0")
-    try:
-        line = input("posx> ").strip()
-    except EOFError:
+def ask_posx(parent: tk.Tk | None = None) -> list[float] | None:
+    """펜던트 posx 수동 입력 (tkinter 다이얼로그)."""
+    text = simpledialog.askstring(
+        "posx 입력",
+        "펜던트 posx (mm, deg)\n예: 400.0 0.0 300.0 0.0 180.0 0.0",
+        parent=parent,
+    )
+    if text is None:
         return None
-    return parse_posx(line)
+    return parse_posx(text)
 
 
-def resolve_posx(robot: DoosanClient | None) -> list[float] | None:
+def resolve_posx(
+    robot: DoosanClient | None, parent: tk.Tk | None = None
+) -> list[float] | None:
     """연결돼 있으면 컨트롤러에서 posx 자동 읽기, 아니면 수동 입력."""
     if robot is not None and robot.connected:
         posx = robot.get_posx_mm_deg()
         if posx is not None:
-            print(
-                "자동 posx: "
+            msg = (
+                "자동으로 읽은 posx:\n"
                 f"{posx[0]:.3f} {posx[1]:.3f} {posx[2]:.3f} "
-                f"{posx[3]:.3f} {posx[4]:.3f} {posx[5]:.3f}"
+                f"{posx[3]:.3f} {posx[4]:.3f} {posx[5]:.3f}\n\n"
+                "이 값으로 저장할까요?\n"
+                "(아니오 = 수동 입력)"
             )
-            try:
-                confirm = input("이 값으로 저장할까요? [Y/n/수동입력 m] ").strip().lower()
-            except EOFError:
-                confirm = "y"
-            if confirm in ("", "y", "yes"):
+            if messagebox.askyesno("posx 확인", msg, parent=parent):
                 return posx
-            if confirm not in ("m", "manual"):
-                print("저장 취소")
-                return None
-        else:
-            print("자동 posx 읽기 실패 → 수동 입력으로 전환")
-    return ask_posx()
+            return ask_posx(parent)
+        print("자동 posx 읽기 실패 → 수동 입력으로 전환")
+    return ask_posx(parent)
 
 
 def save_sample(sample_dir: Path, index: int, color_bgr: np.ndarray,
@@ -500,35 +502,286 @@ def estimate_residual(samples: list[dict], R_c2b: np.ndarray,
     }
 
 
-def draw_hud(
-    img: np.ndarray,
-    n_samples: int,
-    board_ok: bool,
-    robot_ok: bool,
+def annotate_frame(
+    color: np.ndarray,
+    K: np.ndarray,
+    dist: np.ndarray,
+    ok: bool,
+    charuco_corners,
+    rvec,
+    t_t2c,
+    marker_corners,
+    marker_ids,
 ) -> np.ndarray:
-    out = img.copy()
-    lines = [
-        f"Samples: {n_samples}",
-        "Board: OK" if board_ok else "Board: NOT FOUND (ChArUco)",
-        "Robot: MANUAL" if robot_ok else "Robot: OFF (manual pose)",
-        "s: save | c: calibrate | d: delete last | q: quit",
-        (
-            f"ChArUco {CHARUCO_SQUARES_X}x{CHARUCO_SQUARES_Y}, "
-            f"sq={SQUARE_SIZE_M*1000:.1f}mm, mk={MARKER_SIZE_M*1000:.1f}mm, "
-            f"dict={_charuco_state.get('dict_name') or '?'}"
-        ),
-    ]
-    y = 30
-    for i, text in enumerate(lines):
-        if i == 1:
-            color = (0, 255, 0) if board_ok else (0, 0, 255)
-        elif i == 2:
-            color = (0, 255, 0) if robot_ok else (0, 165, 255)
-        else:
-            color = (0, 255, 0)
-        cv2.putText(out, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        y += 28
-    return out
+    display = color.copy()
+    if marker_corners is not None and marker_ids is not None:
+        cv2.aruco.drawDetectedMarkers(display, marker_corners, marker_ids)
+    if ok and charuco_corners is not None:
+        if hasattr(cv2.aruco, "drawDetectedCornersCharuco"):
+            cv2.aruco.drawDetectedCornersCharuco(
+                display, charuco_corners, None, (0, 255, 0)
+            )
+        if rvec is not None and t_t2c is not None:
+            if hasattr(cv2, "drawFrameAxes"):
+                cv2.drawFrameAxes(
+                    display, K, dist, rvec, t_t2c, 3 * SQUARE_SIZE_M
+                )
+            else:
+                axis = np.float32(
+                    [
+                        [0, 0, 0],
+                        [3 * SQUARE_SIZE_M, 0, 0],
+                        [0, 3 * SQUARE_SIZE_M, 0],
+                        [0, 0, -3 * SQUARE_SIZE_M],
+                    ]
+                )
+                imgpts, _ = cv2.projectPoints(axis, rvec, t_t2c, K, dist)
+                imgpts = imgpts.astype(int)
+                o = tuple(imgpts[0].ravel())
+                cv2.line(display, o, tuple(imgpts[1].ravel()), (0, 0, 255), 2)
+                cv2.line(display, o, tuple(imgpts[2].ravel()), (0, 255, 0), 2)
+                cv2.line(display, o, tuple(imgpts[3].ravel()), (255, 0, 0), 2)
+    return display
+
+
+class HandEyeCalibApp:
+    def __init__(
+        self,
+        root: tk.Tk,
+        robot: DoosanClient | None,
+        robot_ok: bool,
+        sample_dir: Path,
+        samples: list[dict],
+        next_index: int,
+    ):
+        self.root = root
+        self.robot = robot
+        self.robot_ok = robot_ok
+        self.sample_dir = sample_dir
+        self.samples = samples
+        self.next_index = next_index
+        self._closed = False
+        self._photo = None
+        self._busy = False
+
+        self._latest = {
+            "color": None,
+            "ok": False,
+            "R_t2c": None,
+            "t_t2c": None,
+        }
+
+        self.status_var = tk.StringVar(value="보드가 보이면 [저장]을 누르세요")
+        self.info_var = tk.StringVar(
+            value=(
+                f"Samples={len(samples)}  Board=?  "
+                f"Robot={'MANUAL' if robot_ok else 'OFF'}  "
+                f"Euler={EULER_ORDER}"
+            )
+        )
+
+        root.title(WINDOW_NAME)
+        root.geometry("1100x750")
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        top = ttk.Frame(root, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, textvariable=self.status_var, font=("Sans", 11)).pack(anchor=tk.W)
+        ttk.Label(top, textvariable=self.info_var).pack(anchor=tk.W)
+
+        btns = ttk.Frame(root, padding=8)
+        btns.pack(fill=tk.X)
+        self.btn_save = ttk.Button(btns, text="저장 (샘플)", command=self.on_save)
+        self.btn_save.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btns, text="삭제 (마지막)", command=self.on_delete).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btns, text="캘리브 계산", command=self.on_calibrate).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btns, text="종료", command=self.on_close).pack(side=tk.LEFT)
+
+        self.video = tk.Label(root)
+        self.video.pack(fill=tk.BOTH, expand=True)
+
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, rs.format.bgr8, 30)
+        profile = self.pipeline.start(config)
+        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        intr = color_profile.get_intrinsics()
+        self.K, self.dist = intrinsics_to_camera_matrix(intr)
+        print(
+            f"intrinsic fx={intr.fx:.2f}, fy={intr.fy:.2f}, "
+            f"ppx={intr.ppx:.2f}, ppy={intr.ppy:.2f}"
+        )
+
+        self.root.after(10, self.update_frame)
+
+    def _refresh_info(self, board_ok: bool) -> None:
+        self.info_var.set(
+            f"Samples={len(self.samples)}  "
+            f"Board={'OK' if board_ok else 'NOT FOUND'}  "
+            f"Robot={'MANUAL' if self.robot_ok else 'OFF'}  "
+            f"dict={_charuco_state.get('dict_name') or '?'}  "
+            f"Euler={EULER_ORDER}"
+        )
+        self.btn_save.configure(state=tk.NORMAL if board_ok and not self._busy else tk.DISABLED)
+
+    def update_frame(self) -> None:
+        if self._closed:
+            return
+        try:
+            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+            color_frame = frames.get_color_frame()
+            if color_frame:
+                color = np.asanyarray(color_frame.get_data())
+                gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+                ok, R_t2c, t_t2c, charuco_corners, rvec, marker_corners, marker_ids = (
+                    detect_board(gray, self.K, self.dist)
+                )
+                self._latest = {
+                    "color": color,
+                    "ok": ok,
+                    "R_t2c": R_t2c,
+                    "t_t2c": t_t2c,
+                }
+                display = annotate_frame(
+                    color,
+                    self.K,
+                    self.dist,
+                    ok,
+                    charuco_corners,
+                    rvec,
+                    t_t2c,
+                    marker_corners,
+                    marker_ids,
+                )
+                self._refresh_info(ok)
+
+                ok_enc, buf = cv2.imencode(".png", display)
+                if ok_enc:
+                    self._photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+                    self.video.configure(image=self._photo)
+        except Exception as exc:
+            if not self._closed:
+                print(f"[카메라] {exc}")
+
+        if not self._closed:
+            self.root.after(30, self.update_frame)
+
+    def on_save(self) -> None:
+        if self._busy:
+            return
+        latest = self._latest
+        if not latest["ok"] or latest["color"] is None:
+            messagebox.showwarning(
+                "저장 불가",
+                "ChArUco가 검출되지 않았습니다.\n보드 전체를 보이게 하세요.",
+                parent=self.root,
+            )
+            return
+
+        posx = resolve_posx(self.robot if self.robot_ok else None, parent=self.root)
+        if posx is None:
+            self.status_var.set("저장 취소")
+            return
+
+        meta_path = save_sample(
+            self.sample_dir,
+            self.next_index,
+            latest["color"],
+            posx,
+            latest["R_t2c"],
+            latest["t_t2c"],
+        )
+        self.samples.append(json.loads(meta_path.read_text(encoding="utf-8")))
+        msg = (
+            f"저장: sample_{self.next_index:03d}  "
+            f"posx={posx}  (총 {len(self.samples)}개)"
+        )
+        print(msg)
+        self.status_var.set(msg)
+        self.next_index += 1
+        self._refresh_info(True)
+
+    def on_delete(self) -> None:
+        if not self.samples:
+            messagebox.showinfo("삭제", "삭제할 샘플이 없습니다.", parent=self.root)
+            return
+        last = self.samples.pop()
+        idx = last["index"]
+        for path in self.sample_dir.glob(f"sample_{idx:03d}.*"):
+            path.unlink(missing_ok=True)
+        msg = f"삭제: sample_{idx:03d}  (남은 {len(self.samples)}개)"
+        print(msg)
+        self.status_var.set(msg)
+        self._refresh_info(bool(self._latest.get("ok")))
+
+    def on_calibrate(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self.status_var.set("캘리브 계산 중...")
+        self.root.update_idletasks()
+
+        def worker():
+            err = None
+            result = None
+            try:
+                samples = load_samples(self.sample_dir)
+                self.samples = samples
+                result = run_calibration(samples)
+                if result is not None:
+                    out_json = OUTPUT_DIR / "cam2base.json"
+                    out_npz = OUTPUT_DIR / "cam2base.npz"
+                    out_json.write_text(
+                        json.dumps(result, indent=2), encoding="utf-8"
+                    )
+                    np.savez(
+                        out_npz,
+                        R_cam2base=np.array(result["R_cam2base"]),
+                        t_cam2base_m=np.array(result["t_cam2base_m"]),
+                    )
+                    print(f"저장 완료: {out_json}")
+                    print(f"저장 완료: {out_npz}")
+            except Exception as exc:
+                err = exc
+            self.root.after(0, lambda: self._on_calib_done(result, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_calib_done(self, result, err) -> None:
+        self._busy = False
+        if err is not None:
+            messagebox.showerror("캘리브 오류", str(err), parent=self.root)
+            self.status_var.set("캘리브 실패")
+            return
+        if result is None:
+            self.status_var.set(
+                f"샘플 부족 (최소 {MIN_SAMPLES}개, 현재 {len(self.samples)}개)"
+            )
+            return
+        residual = result.get("residual_mm", {})
+        mean_mm = residual.get("mean_mm", float("nan"))
+        max_mm = residual.get("max_mm", float("nan"))
+        msg = f"캘리브 완료 — 잔차 mean={mean_mm:.1f}mm max={max_mm:.1f}mm"
+        self.status_var.set(msg)
+        messagebox.showinfo(
+            "캘리브 완료",
+            f"{msg}\n\n저장: hand_eye_data/cam2base.json / .npz",
+            parent=self.root,
+        )
+
+    def on_close(self) -> None:
+        self._closed = True
+        try:
+            self.pipeline.stop()
+        except Exception:
+            pass
+        if self.robot is not None:
+            self.robot.close()
+        self.root.destroy()
 
 
 def main() -> None:
@@ -548,156 +801,22 @@ def main() -> None:
     if not robot_ok and not ALLOW_WITHOUT_ROBOT:
         print("로봇 연결/Manual 전환 실패로 종료합니다.")
         return
+    if not robot_ok:
+        robot = None
+        print("로봇 미연결 — pose 수동 입력 모드")
 
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.color, rs.format.bgr8, 30)
-
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-
-    print("Eye-to-Hand 캘리브레이션 (ChArUco)")
+    print("Eye-to-Hand 캘리브레이션 (ChArUco, tkinter GUI)")
     print(f"샘플 폴더: {sample_dir}")
     print(f"기존 샘플: {len(samples)}개")
     print(
         f"보드 설정: {CHARUCO_SQUARES_X}x{CHARUCO_SQUARES_Y} squares, "
         f"square={SQUARE_SIZE_M*1000:.1f}mm, marker={MARKER_SIZE_M*1000:.1f}mm"
     )
-    print("→ 칸/마커 길이는 자로 재서 코드 상단 값을 수정하세요.")
-    if robot_ok:
-        print("로봇: Manual 모드 — 조그/직접교시로 자세를 잡은 뒤 s")
-    else:
-        print("로봇 미연결 — 펜던트 Manual + s 후 pose 수동 입력")
-    print()
+    print(f"Euler={EULER_ORDER}")
 
-    try:
-        profile = pipeline.start(config)
-        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
-        intr = color_profile.get_intrinsics()
-        K, dist = intrinsics_to_camera_matrix(intr)
-        print(
-            f"intrinsic fx={intr.fx:.2f}, fy={intr.fy:.2f}, "
-            f"ppx={intr.ppx:.2f}, ppy={intr.ppy:.2f}"
-        )
-
-        while True:
-            frames = pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
-            if not color_frame:
-                continue
-
-            color = np.asanyarray(color_frame.get_data())
-            gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-            ok, R_t2c, t_t2c, charuco_corners, rvec, marker_corners, marker_ids = (
-                detect_board(gray, K, dist)
-            )
-
-            display = color.copy()
-            if marker_corners is not None and marker_ids is not None:
-                cv2.aruco.drawDetectedMarkers(display, marker_corners, marker_ids)
-            if ok and charuco_corners is not None:
-                if hasattr(cv2.aruco, "drawDetectedCornersCharuco"):
-                    cv2.aruco.drawDetectedCornersCharuco(
-                        display, charuco_corners, None, (0, 255, 0)
-                    )
-                if rvec is not None and t_t2c is not None:
-                    if hasattr(cv2, "drawFrameAxes"):
-                        cv2.drawFrameAxes(
-                            display, K, dist, rvec, t_t2c, 3 * SQUARE_SIZE_M
-                        )
-                    else:
-                        axis = np.float32(
-                            [
-                                [0, 0, 0],
-                                [3 * SQUARE_SIZE_M, 0, 0],
-                                [0, 3 * SQUARE_SIZE_M, 0],
-                                [0, 0, -3 * SQUARE_SIZE_M],
-                            ]
-                        )
-                        imgpts, _ = cv2.projectPoints(axis, rvec, t_t2c, K, dist)
-                        imgpts = imgpts.astype(int)
-                        o = tuple(imgpts[0].ravel())
-                        cv2.line(
-                            display, o, tuple(imgpts[1].ravel()), (0, 0, 255), 2
-                        )
-                        cv2.line(
-                            display, o, tuple(imgpts[2].ravel()), (0, 255, 0), 2
-                        )
-                        cv2.line(
-                            display, o, tuple(imgpts[3].ravel()), (255, 0, 0), 2
-                        )
-
-            display = draw_hud(display, len(samples), ok, robot_ok)
-            cv2.imshow(WINDOW_NAME, display)
-            key = cv2.waitKey(1) & 0xFF
-
-            if key in (ord("q"), 27):
-                break
-
-            if key == ord("s"):
-                if not ok:
-                    print(
-                        "ChArUco가 검출되지 않았습니다. "
-                        "보드 전체가 보이게, SQUARE_SIZE_M/MARKER_SIZE_M을 실측값으로 맞추세요."
-                    )
-                    continue
-                posx = resolve_posx(robot if robot_ok else None)
-                if posx is None:
-                    print("입력이 취소되었습니다.")
-                    continue
-                meta_path = save_sample(
-                    sample_dir, next_index, color, posx, R_t2c, t_t2c
-                )
-                samples.append(json.loads(meta_path.read_text(encoding="utf-8")))
-                print(
-                    f"저장: sample_{next_index:03d}  "
-                    f"posx={posx}  (총 {len(samples)}개)"
-                )
-                next_index += 1
-
-            if key == ord("d"):
-                if not samples:
-                    print("삭제할 샘플이 없습니다.")
-                    continue
-                last = samples.pop()
-                idx = last["index"]
-                for path in sample_dir.glob(f"sample_{idx:03d}.*"):
-                    path.unlink(missing_ok=True)
-                print(f"삭제: sample_{idx:03d}  (남은 {len(samples)}개)")
-
-            if key == ord("c"):
-                # 디스크에서 다시 로드 (수동 편집 반영)
-                samples = load_samples(sample_dir)
-                result = run_calibration(samples)
-                if result is None:
-                    continue
-                out_json = OUTPUT_DIR / "cam2base.json"
-                out_npz = OUTPUT_DIR / "cam2base.npz"
-                out_json.write_text(
-                    json.dumps(result, indent=2), encoding="utf-8"
-                )
-                np.savez(
-                    out_npz,
-                    R_cam2base=np.array(result["R_cam2base"]),
-                    t_cam2base_m=np.array(result["t_cam2base_m"]),
-                )
-                print()
-                print(f"저장 완료: {out_json}")
-                print(f"저장 완료: {out_npz}")
-                print(
-                    "사용 예: P_base = R @ P_cam + t  "
-                    "(P_cam: test2.py 카메라 좌표, 단위 m)"
-                )
-
-            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-                break
-
-    finally:
-        try:
-            pipeline.stop()
-        except Exception:
-            pass
-        cv2.destroyAllWindows()
-        robot.close()
+    root = tk.Tk()
+    HandEyeCalibApp(root, robot, robot_ok, sample_dir, samples, next_index)
+    root.mainloop()
 
 
 if __name__ == "__main__":

@@ -28,10 +28,12 @@ DR_MV_MOD_ABS = 0
 
 
 def _ensure_doosan_ws_pythonpath(ws: Path = DOOSAN_WS) -> None:
+    """doosan_ws install 의 Python/라이브러리 경로를 프로세스에 주입."""
     install = ws / "install"
     if not install.is_dir():
         return
 
+    # --- Python path ---
     for site in install.glob("*/lib/python*/site-packages"):
         p = str(site)
         if p not in sys.path:
@@ -41,12 +43,54 @@ def _ensure_doosan_ws_pythonpath(ws: Path = DOOSAN_WS) -> None:
         if p not in sys.path:
             sys.path.insert(0, p)
 
+    # --- AMENT_PREFIX_PATH ---
     prefix = os.environ.get("AMENT_PREFIX_PATH", "")
     parts = [str(p) for p in install.iterdir() if p.is_dir()]
     if parts:
         os.environ["AMENT_PREFIX_PATH"] = os.pathsep.join(
             parts + ([prefix] if prefix else [])
         )
+
+    # --- LD_LIBRARY_PATH (dsr_msgs2 .so 등) ---
+    lib_dirs: list[str] = []
+    for lib in install.glob("*/lib"):
+        if lib.is_dir():
+            lib_dirs.append(str(lib))
+    # 확장 모듈이 site-packages 아래에 있는 경우
+    for site in install.glob("*/lib/python*/site-packages/*"):
+        if site.is_dir() and any(site.glob("*.so")):
+            lib_dirs.append(str(site))
+
+    if lib_dirs:
+        old = os.environ.get("LD_LIBRARY_PATH", "")
+        merged = os.pathsep.join(lib_dirs + ([old] if old else []))
+        os.environ["LD_LIBRARY_PATH"] = merged
+
+    # 런타임에 LD_LIBRARY_PATH 만 바꿔서는 dlopen 이 실패하는 경우가 있어 preload
+    try:
+        import ctypes
+
+        dsr_lib = install / "dsr_msgs2" / "lib"
+        if dsr_lib.is_dir():
+            # generator_py 가 typesupport 등을 필요로 하므로 관련 .so 전부 로드
+            for name in (
+                "libdsr_msgs2__rosidl_generator_c.so",
+                "libdsr_msgs2__rosidl_typesupport_c.so",
+                "libdsr_msgs2__rosidl_typesupport_cpp.so",
+                "libdsr_msgs2__rosidl_typesupport_introspection_c.so",
+                "libdsr_msgs2__rosidl_typesupport_fastrtps_c.so",
+                "libdsr_msgs2__rosidl_typesupport_fastrtps_cpp.so",
+                "libdsr_msgs2__rosidl_generator_py.so",
+            ):
+                so = dsr_lib / name
+                if so.is_file():
+                    try:
+                        ctypes.CDLL(str(so), mode=ctypes.RTLD_GLOBAL)
+                    except OSError as exc:
+                        print(f"[로봇] preload 경고 {so.name}: {exc}")
+    except Exception as exc:
+        print(f"[로봇] shared lib preload 경고: {exc}")
+
 
 
 @dataclass
@@ -101,8 +145,10 @@ class DoosanClient:
         except ImportError as exc:
             print()
             print("[로봇] doosan_ws ROS2 패키지를 import하지 못했습니다.")
-            print("       source /opt/ros/$ROS_DISTRO/setup.bash")
-            print(f"       source {self.ws}/install/setup.bash")
+            print("       아래를 같은 터미널에서 실행한 뒤 다시 시도하세요:")
+            print("         source /opt/ros/$ROS_DISTRO/setup.bash")
+            print(f"         source {self.ws}/install/setup.bash")
+            print("       (setup.bash 가 LD_LIBRARY_PATH 에 dsr_msgs2/lib 을 넣어 줍니다)")
             print(f"       ImportError: {exc}")
             print()
             return False
