@@ -1,0 +1,53 @@
+{
+  "measured_at": "2026-07-14",
+  "object": "500ml 페트 물병",
+  "note": "285g 점을 처음에 270g 으로 잘못 기록했었습니다. 정정 후 R² 0.9973 → 0.9997",
+  "conditions": {
+    "pose_deg": [
+      -13.181,
+      -23.339,
+      94.612,
+      15.686,
+      55.968,
+      -15.458
+    ],
+    "tool": {
+      "name": "rh_p12_rn",
+      "weight_kg": 0.5,
+      "cog_mm": [
+        0,
+        0,
+        60
+      ]
+    },
+    "gripper": {
+      "stroke_cmd": 186,
+      "stroke_actual": 206,
+      "current": 350,
+      "object_width_mm": 30
+    },
+    "method": "dither(J2 ±1°) + 5회 평균, 절대 J2 모터토크"
+  },
+  "fit": {
+    "joint": "J2",
+    "form": "mass_g = a*tau + b",
+    "a": -214.2,
+    "b": -1594.5,
+    "r2": 0.9997,
+    "rmse_g": 3.6
+  },
+  "points": [
+    {
+      "mass_kg": 0.02,
+      "tau": -7.526
+    },
+    {
+      "mass_kg": 0.285,
+      "tau": -8.798
+    },
+    {
+      "mass_kg": 0.52,
+      "tau": -9.858
+    }
+  ]
+}

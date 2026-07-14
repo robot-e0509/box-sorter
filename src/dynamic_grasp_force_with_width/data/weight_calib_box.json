@@ -1,0 +1,55 @@
+{
+  "measured_at": "2026-07-15",
+  "object": "골판지 상자",
+  "conditions": {
+    "pose_deg": [
+      -13.181,
+      -23.339,
+      94.612,
+      15.686,
+      55.968,
+      -15.458
+    ],
+    "tool": {
+      "name": "rh_p12_rn",
+      "weight_kg": 0.5,
+      "cog_mm": [
+        0,
+        0,
+        60
+      ]
+    },
+    "gripper": {
+      "stroke_cmd": 495,
+      "stroke_actual": 516,
+      "current": 350,
+      "object_width_mm": 75
+    },
+    "method": "dither(J2 ±1°) + 5회 평균, 절대 J2 모터토크"
+  },
+  "fit": {
+    "joint": "J2",
+    "form": "mass_g = a*tau + b",
+    "a": -163.6,
+    "b": -1067.0,
+    "r2": 0.998,
+    "rmse_g": 6.2
+  },
+  "points": [
+    {
+      "mass_kg": 0.097,
+      "tau": -7.102,
+      "sem": 0.06
+    },
+    {
+      "mass_kg": 0.32,
+      "tau": -8.533,
+      "sem": 0.029
+    },
+    {
+      "mass_kg": 0.43,
+      "tau": -9.116,
+      "sem": 0.024
+    }
+  ]
+}
