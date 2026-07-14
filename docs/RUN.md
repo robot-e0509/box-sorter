@@ -55,9 +55,49 @@ Summary: 31 packages finished       ← 성공
 (`SetSingularityHandlingForce`) 버그가 있어서, 그대로 쓰면 로봇 연결이 실패합니다.
 `dsr_study` 의 수정본으로 덮어쓴 것이니 **다시 패치하지 마세요.**
 
-## 실행
+## 실행 — 스크립트로 (권장)
 
-빌드가 끝났다는 가정입니다. **모든 터미널에서 `source install/setup.bash` 를 먼저 해야 합니다.**
+터미널 하나에서 끝납니다. ping 확인 → 로봇 드라이버 → 그리퍼 서버를 순서대로 띄우고,
+각 단계가 실제로 올라왔는지 확인한 뒤 다음으로 넘어갑니다. 실패하면 어디서 막혔는지 알려줍니다.
+
+```bash
+cd ~/doosan_ws
+
+./scripts/robot_up.sh              # 로봇 + 그리퍼 서버 기동 (RViz 포함)
+./scripts/robot_up.sh --no-rviz    # RViz 없이 (가볍고 빠름)
+
+./scripts/gripper.sh open          # 그리퍼 열기
+./scripts/gripper.sh close 300     # 닫기 (파지 힘 300)
+./scripts/gripper.sh set 375 200   # 임의 위치(0~750) + 힘
+
+./scripts/robot_down.sh            # 종료 ★ 쓰고 나면 반드시 내려주세요
+```
+
+> **끝내고 나면 꼭 `robot_down.sh` 를 실행하세요.** 드라이버가 떠 있는 채로 두면
+> 다음 사람이 로봇을 못 씁니다 (컨트롤러 접속이 하나만 허용됩니다).
+
+로그는 `/tmp/doosan_ws_run/` 에 남습니다.
+
+```bash
+tail -f /tmp/doosan_ws_run/bringup.log     # 로봇 드라이버
+tail -f /tmp/doosan_ws_run/gripper.log     # 그리퍼 서버
+```
+
+### 파지 강도 실험
+
+동적 강도 팀에 필요한 데이터(폭 / 무게 / 안 미끄러지는 최소 `current`)를 만드는 명령입니다.
+`current` 를 낮은 값부터 올려가며, 매번 상자를 들어올려 버티는지 확인합니다.
+
+```bash
+./scripts/gripper.sh sweep 150 400 50    # current 150 → 400 까지 50 씩
+```
+
+버티기 시작한 값이 **그 상자의 최소 파지력**입니다. 그 값을 기록해서 공유하세요.
+
+## 실행 — 손으로 (터미널 3개)
+
+스크립트가 뭘 하는지 알고 싶거나, 단계를 나눠서 보고 싶을 때.
+**모든 터미널에서 `source install/setup.bash` 를 먼저 해야 합니다.**
 (안 하면 `Package 'dsr_gripper' not found`, `ModuleNotFoundError: DR_init` 이 납니다)
 
 ### 0. 연결 확인
