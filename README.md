@@ -6,6 +6,12 @@
 카메라로 읽고 해당 목적지로 옮기는 물류 분류 시스템입니다.
 상자의 크기·무게에 맞춰 **파지 강도를 스스로 조절**하는 것이 이 프로젝트의 핵심입니다.
 
+## 시연 영상
+
+[![시연 영상](https://img.youtube.com/vi/qVYhtreRa00/0.jpg)](https://www.youtube.com/watch?v=qVYhtreRa00)
+
+> 위 이미지를 클릭하면 유튜브에서 시연 영상을 볼 수 있습니다.
+
 ![시스템 구조](docs/architecture.png)
 
 > 다이어그램 원본: [`docs/architecture.excalidraw`](docs/architecture.excalidraw)
@@ -34,7 +40,7 @@ cd doosan_ws && colcon build --symlink-install && source install/setup.bash
 doosan_ws/
 ├── docs/
 │   ├── RUN.md                    설치 · 실행 · 트러블슈팅
-│   └── architecture.excalidraw   시스템 구조 다이어그램 (수정용 원본)
+│   └── architecture.excalidraw   시스템 구조 다이어그램
 ├── notebooks/
 │   └── 00_robot_connect.ipynb    로봇 연결 · 좌표 확인
 └── src/
@@ -66,17 +72,6 @@ doosan_ws/
 | **OCR** | 엄요한, 이광희 | 카메라 이미지에서 라벨(서울/수원/경기) 읽기 |
 | **고정 강도 파지** | 조성래, 윤정우 | 고정 크기 상자 · 파지 강도 하드코딩 |
 | **동적 강도 파지** | 송다현, 정수진 | 상자 폭·무게에 따라 파지 강도 계산 |
-
-## 협업 규칙
-
-각 팀은 `src/` 아래에 **자기 폴더를 만들어** 작업합니다. 합치는 건 나중에 합니다.
-`main` 에 직접 push 하지 말고 브랜치 → PR 로 올려주세요.
-
-```bash
-git switch -c feat/ocr-easyocr        # feat/ fix/ docs/ exp/
-git commit -m "feat(ocr): EasyOCR 로 한글 라벨 인식"
-git push -u origin feat/ocr-easyocr   # → 깃헙에서 PR
-```
 
 **로봇은 한 명씩 씁니다.** 두 명이 동시에 명령을 보내면 섞여서 위험합니다.
 자세한 안전 수칙은 [RUN.md](docs/RUN.md#안전) 참고.
