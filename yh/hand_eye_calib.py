@@ -376,6 +376,138 @@ def load_samples(sample_dir: Path) -> list[dict]:
     return samples
 
 
+def _rt_to_T(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    T[:3, 3] = np.asarray(t, dtype=np.float64).reshape(3)
+    return T
+
+
+def _skew3(v: np.ndarray) -> np.ndarray:
+    x, y, z = np.asarray(v, dtype=np.float64).reshape(3)
+    return np.array(
+        [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+        dtype=np.float64,
+    )
+
+
+def _rot_to_modified_rodrigues(R: np.ndarray) -> np.ndarray:
+    """Tsai용: P = 2 sin(θ/2) * axis."""
+    rvec, _ = cv2.Rodrigues(np.asarray(R, dtype=np.float64).reshape(3, 3))
+    r = rvec.reshape(3)
+    theta = float(np.linalg.norm(r))
+    if theta < 1e-12:
+        return np.zeros(3, dtype=np.float64)
+    return (2.0 * math.sin(theta / 2.0) / theta) * r
+
+
+def _modified_rodrigues_to_R(p: np.ndarray) -> np.ndarray:
+    p = np.asarray(p, dtype=np.float64).reshape(3)
+    n2 = float(np.dot(p, p))
+    if n2 < 1e-16:
+        return np.eye(3, dtype=np.float64)
+    half = min(1.0, 0.5 * math.sqrt(n2))
+    theta = 2.0 * math.asin(half)
+    axis = p / math.sqrt(n2)
+    rvec = (theta * axis).reshape(3, 1)
+    R, _ = cv2.Rodrigues(rvec)
+    return np.asarray(R, dtype=np.float64).reshape(3, 3)
+
+
+def _calibrate_hand_eye_tsai_numpy(
+    R_g2b_list: list[np.ndarray],
+    t_g2b_list: list[np.ndarray],
+    R_t2c_list: list[np.ndarray],
+    t_t2c_list: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    OpenCV calibrateHandEye(TSAI) 입력 규약의 NumPy 폴백.
+    eye-to-hand: base→gripper, target→cam → cam→base.
+    """
+    n = len(R_g2b_list)
+    if n < 3:
+        raise ValueError("Tsai hand-eye 에는 최소 3개 샘플이 필요합니다")
+
+    Hg = [_rt_to_T(R_g2b_list[i], t_g2b_list[i]) for i in range(n)]
+    Hc = [_rt_to_T(R_t2c_list[i], t_t2c_list[i]) for i in range(n)]
+
+    Pg_list: list[np.ndarray] = []
+    Pc_list: list[np.ndarray] = []
+    Ra_list: list[np.ndarray] = []
+    ta_list: list[np.ndarray] = []
+    tb_list: list[np.ndarray] = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            A = np.linalg.inv(Hg[i]) @ Hg[j]
+            B = Hc[i] @ np.linalg.inv(Hc[j])
+            Ra, Rb = A[:3, :3], B[:3, :3]
+            if (
+                float(np.linalg.norm(cv2.Rodrigues(Ra)[0])) < 0.05
+                or float(np.linalg.norm(cv2.Rodrigues(Rb)[0])) < 0.05
+            ):
+                continue
+            Pg_list.append(_rot_to_modified_rodrigues(Ra))
+            Pc_list.append(_rot_to_modified_rodrigues(Rb))
+            Ra_list.append(Ra)
+            ta_list.append(A[:3, 3].copy())
+            tb_list.append(B[:3, 3].copy())
+
+    if len(Pg_list) < 2:
+        raise RuntimeError(
+            "유효한 상대자세 쌍이 부족합니다 (자세를 더 다양하게 촬영하세요)"
+        )
+
+    rows = [_skew3(Pg + Pc) for Pg, Pc in zip(Pg_list, Pc_list)]
+    rhs = [(Pc - Pg).reshape(3, 1) for Pg, Pc in zip(Pg_list, Pc_list)]
+    Px, *_ = np.linalg.lstsq(np.vstack(rows), np.vstack(rhs), rcond=None)
+    Px = Px.reshape(3)
+    denom = math.sqrt(1.0 + float(np.dot(Px, Px)))
+    Px = (2.0 / denom) * Px
+    Rx = _modified_rodrigues_to_R(Px)
+
+    I = np.eye(3, dtype=np.float64)
+    rows_t = [Ra - I for Ra in Ra_list]
+    rhs_t = [
+        (Rx @ tb.reshape(3) - ta.reshape(3)).reshape(3, 1)
+        for ta, tb in zip(ta_list, tb_list)
+    ]
+    tx, *_ = np.linalg.lstsq(np.vstack(rows_t), np.vstack(rhs_t), rcond=None)
+    return Rx, tx.reshape(3, 1)
+
+
+def calibrate_hand_eye(
+    R_g2b_list: list[np.ndarray],
+    t_g2b_list: list[np.ndarray],
+    R_t2c_list: list[np.ndarray],
+    t_t2c_list: list[np.ndarray],
+    *,
+    method: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """cv2.calibrateHandEye 래퍼. 없으면 Tsai NumPy 폴백."""
+    if hasattr(cv2, "calibrateHandEye"):
+        kw = {}
+        if method is not None:
+            kw["method"] = method
+        return cv2.calibrateHandEye(
+            R_g2b_list,
+            t_g2b_list,
+            R_t2c_list,
+            t_t2c_list,
+            **kw,
+        )
+
+    if not getattr(calibrate_hand_eye, "_warned", False):
+        print(
+            "[캘리브] cv2.calibrateHandEye 없음 "
+            f"(OpenCV {cv2.__version__}) — Tsai NumPy 폴백 사용"
+        )
+        calibrate_hand_eye._warned = True  # type: ignore[attr-defined]
+    return _calibrate_hand_eye_tsai_numpy(
+        R_g2b_list, t_g2b_list, R_t2c_list, t_t2c_list
+    )
+
+
 def run_calibration(samples: list[dict]) -> dict | None:
     if len(samples) < MIN_SAMPLES:
         print(f"샘플이 {len(samples)}개뿐입니다. 최소 {MIN_SAMPLES}개 필요합니다.")
@@ -398,22 +530,28 @@ def run_calibration(samples: list[dict]) -> dict | None:
             np.array(s["t_target2cam_m"], dtype=np.float64).reshape(3, 1)
         )
 
-    methods = [
-        ("TSAI", cv2.CALIB_HAND_EYE_TSAI),
-        ("PARK", cv2.CALIB_HAND_EYE_PARK),
-        ("HORAUD", cv2.CALIB_HAND_EYE_HORAUD),
-        ("DANIILIDIS", cv2.CALIB_HAND_EYE_DANIILIDIS),
-    ]
+    use_cv = hasattr(cv2, "calibrateHandEye")
+    if use_cv:
+        methods = [
+            ("TSAI", cv2.CALIB_HAND_EYE_TSAI),
+            ("PARK", cv2.CALIB_HAND_EYE_PARK),
+            ("HORAUD", cv2.CALIB_HAND_EYE_HORAUD),
+            ("DANIILIDIS", cv2.CALIB_HAND_EYE_DANIILIDIS),
+        ]
+    else:
+        methods = [("TSAI", None)]
 
     results = {}
     print()
     print("=" * 60)
     print(f"Eye-to-Hand 캘리브레이션  (샘플 {len(samples)}개)")
     print(f"Euler 변환: {EULER_ORDER}  (두산 기본은 ZYZ)")
+    if not use_cv:
+        print(f"OpenCV {cv2.__version__}: calibrateHandEye 미바인딩 → Tsai 폴백")
     print("=" * 60)
 
     for name, method in methods:
-        R_c2b, t_c2b = cv2.calibrateHandEye(
+        R_c2b, t_c2b = calibrate_hand_eye(
             R_base2grip_list,
             t_base2grip_list,
             R_target2cam_list,
@@ -456,6 +594,7 @@ def run_calibration(samples: list[dict]) -> dict | None:
         "R_cam2base": primary["R_cam2base"].tolist(),
         "t_cam2base_m": primary["t_cam2base_m"].tolist(),
         "residual_mm": residual,
+        "hand_eye_backend": "opencv" if use_cv else "tsai_numpy",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -502,6 +641,45 @@ def estimate_residual(samples: list[dict], R_c2b: np.ndarray,
     }
 
 
+def _corners_nx1x2(corners) -> np.ndarray | None:
+    """
+    OpenCV 5 CharucoDetector 는 (N,2), 이전은 (N,1,2).
+    drawDetectedCornersCharuco 는 channels==2 인 (N,1,2) 필요.
+    """
+    if corners is None:
+        return None
+    pts = np.asarray(corners, dtype=np.float32)
+    if pts.size == 0:
+        return None
+    if pts.ndim == 2 and pts.shape[1] == 2:
+        pts = pts.reshape(-1, 1, 2)
+    elif pts.ndim == 3 and pts.shape[-1] == 2:
+        pts = pts.reshape(-1, 1, 2)
+    else:
+        return None
+    return np.ascontiguousarray(pts)
+
+
+def fit_display(bgr: np.ndarray, max_w: int, max_h: int) -> np.ndarray:
+    """라벨 크기에 맞게 축소 (tk PhotoImage 부담·렉 완화)."""
+    h, w = bgr.shape[:2]
+    max_w = max(int(max_w), 1)
+    max_h = max(int(max_h), 1)
+    scale = min(max_w / w, max_h / h, 1.0)
+    if scale >= 0.999:
+        return bgr
+    dw = max(1, int(round(w * scale)))
+    dh = max(1, int(round(h * scale)))
+    return cv2.resize(bgr, (dw, dh), interpolation=cv2.INTER_AREA)
+
+
+def bgr_to_photo(bgr: np.ndarray) -> tk.PhotoImage:
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        raise RuntimeError("이미지 인코딩 실패")
+    return tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
+
+
 def annotate_frame(
     color: np.ndarray,
     K: np.ndarray,
@@ -514,33 +692,38 @@ def annotate_frame(
     marker_ids,
 ) -> np.ndarray:
     display = color.copy()
-    if marker_corners is not None and marker_ids is not None:
-        cv2.aruco.drawDetectedMarkers(display, marker_corners, marker_ids)
-    if ok and charuco_corners is not None:
-        if hasattr(cv2.aruco, "drawDetectedCornersCharuco"):
-            cv2.aruco.drawDetectedCornersCharuco(
-                display, charuco_corners, None, (0, 255, 0)
-            )
-        if rvec is not None and t_t2c is not None:
-            if hasattr(cv2, "drawFrameAxes"):
-                cv2.drawFrameAxes(
-                    display, K, dist, rvec, t_t2c, 3 * SQUARE_SIZE_M
+    try:
+        if marker_corners is not None and marker_ids is not None:
+            cv2.aruco.drawDetectedMarkers(display, marker_corners, marker_ids)
+        if ok and charuco_corners is not None:
+            cc = _corners_nx1x2(charuco_corners)
+            if cc is not None and hasattr(cv2.aruco, "drawDetectedCornersCharuco"):
+                cv2.aruco.drawDetectedCornersCharuco(
+                    display, cc, None, (0, 255, 0)
                 )
-            else:
-                axis = np.float32(
-                    [
-                        [0, 0, 0],
-                        [3 * SQUARE_SIZE_M, 0, 0],
-                        [0, 3 * SQUARE_SIZE_M, 0],
-                        [0, 0, -3 * SQUARE_SIZE_M],
-                    ]
-                )
-                imgpts, _ = cv2.projectPoints(axis, rvec, t_t2c, K, dist)
-                imgpts = imgpts.astype(int)
-                o = tuple(imgpts[0].ravel())
-                cv2.line(display, o, tuple(imgpts[1].ravel()), (0, 0, 255), 2)
-                cv2.line(display, o, tuple(imgpts[2].ravel()), (0, 255, 0), 2)
-                cv2.line(display, o, tuple(imgpts[3].ravel()), (255, 0, 0), 2)
+            if rvec is not None and t_t2c is not None:
+                if hasattr(cv2, "drawFrameAxes"):
+                    cv2.drawFrameAxes(
+                        display, K, dist, rvec, t_t2c, 3 * SQUARE_SIZE_M
+                    )
+                else:
+                    axis = np.float32(
+                        [
+                            [0, 0, 0],
+                            [3 * SQUARE_SIZE_M, 0, 0],
+                            [0, 3 * SQUARE_SIZE_M, 0],
+                            [0, 0, -3 * SQUARE_SIZE_M],
+                        ]
+                    )
+                    imgpts, _ = cv2.projectPoints(axis, rvec, t_t2c, K, dist)
+                    imgpts = imgpts.astype(int)
+                    o = tuple(imgpts[0].ravel())
+                    cv2.line(display, o, tuple(imgpts[1].ravel()), (0, 0, 255), 2)
+                    cv2.line(display, o, tuple(imgpts[2].ravel()), (0, 255, 0), 2)
+                    cv2.line(display, o, tuple(imgpts[3].ravel()), (255, 0, 0), 2)
+    except Exception as exc:
+        # OpenCV 버전별 드로잉 실패해도 원본 프레임은 표시
+        print(f"[카메라] annotate 경고: {exc}")
     return display
 
 
@@ -628,6 +811,17 @@ class HandEyeCalibApp:
         )
         self.btn_save.configure(state=tk.NORMAL if board_ok and not self._busy else tk.DISABLED)
 
+    def _show_bgr(self, bgr: np.ndarray) -> None:
+        self.root.update_idletasks()
+        lbl_w = max(self.video.winfo_width(), 1)
+        lbl_h = max(self.video.winfo_height(), 1)
+        if lbl_w < 40 or lbl_h < 40:
+            lbl_w = max(self.root.winfo_width() - 24, 640)
+            lbl_h = max(self.root.winfo_height() - 120, 360)
+        disp = fit_display(bgr, lbl_w, lbl_h)
+        self._photo = bgr_to_photo(disp)
+        self.video.configure(image=self._photo)
+
     def update_frame(self) -> None:
         if self._closed:
             return
@@ -658,14 +852,11 @@ class HandEyeCalibApp:
                     marker_ids,
                 )
                 self._refresh_info(ok)
-
-                ok_enc, buf = cv2.imencode(".png", display)
-                if ok_enc:
-                    self._photo = tk.PhotoImage(data=base64.b64encode(buf.tobytes()))
-                    self.video.configure(image=self._photo)
+                self._show_bgr(display)
         except Exception as exc:
             if not self._closed:
                 print(f"[카메라] {exc}")
+                self.status_var.set(f"카메라 오류: {exc}")
 
         if not self._closed:
             self.root.after(30, self.update_frame)

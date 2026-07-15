@@ -1,0 +1,5 @@
+{
+  "custom_close_pos": 370,
+  "custom_close_current": 250,
+  "note": "0=완전닫힘, 750=완전열림, 기본 커스텀닫기=375(반만 닫힘)"
+}

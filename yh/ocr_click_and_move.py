@@ -6,7 +6,8 @@ click_and_move.py 의 RealSense + Doosan movel 을 결합합니다.
 
 이동 기준
   - hand_eye_data/cam2base.npz → 로봇 base XYZ
-  - doosan_ws TCP(그리퍼 tip) + 하향 정자세 후 movel
+  - doosan_ws TCP(그리퍼 tip) + 하향 정자세 후
+    자세 조정 → 목표 XY(현재 Z 유지) → 목표 Z 순서로 movel
 
 조작
   [OCR 실행] : 현재 프레임에서 글자 라벨 검출·base XYZ 계산
@@ -964,6 +965,10 @@ class OcrClickMoveApp:
         def pick_phase(p: str, _n=num, _t=total, _lab=text) -> None:
             if p == "rotate":
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 그리퍼 자세 조정"
+            elif p == "move_xy":
+                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 XY 이동"
+            elif p == "move_z":
+                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 Z 이동"
             else:
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 이동"
             self.root.after(0, lambda m=msg: self.status_var.set(m))
@@ -1027,6 +1032,16 @@ class OcrClickMoveApp:
         def place_phase(p: str, _n=num, _t=total, _lab=text, _k=place_key) -> None:
             if p == "rotate":
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 놓기 전 그리퍼 자세"
+            elif p == "move_xy":
+                msg = (
+                    f"자동물류 [{_n}/{_t}] '{_lab}' → "
+                    f"{_k}구역 XY ({place_x:.0f},{place_y:.0f})"
+                )
+            elif p == "move_z":
+                msg = (
+                    f"자동물류 [{_n}/{_t}] '{_lab}' → "
+                    f"{_k}구역 Z={z_saved:.1f}"
+                )
             else:
                 msg = (
                     f"자동물류 [{_n}/{_t}] '{_lab}' → "
@@ -1268,7 +1283,7 @@ class OcrClickMoveApp:
             f"컨투어 각도(짧은 변): image_skew={skew:.1f}° → base_yaw={yaw:.1f}°"
         )
         print(
-            "실행 target (자세 조정 완료 후 이동): "
+            "실행 target (자세 → XY → Z): "
             f"[{target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}, "
             f"{target[3]:.2f}, {target[4]:.2f}, {target[5]:.2f}]"
         )
@@ -1282,11 +1297,14 @@ class OcrClickMoveApp:
                     self.robot.ensure_gripper_tcp()
 
                 def phase(p: str) -> None:
-                    msg = (
-                        "그리퍼 자세 조정 중..."
-                        if p == "rotate"
-                        else "목표로 이동 중..."
-                    )
+                    if p == "rotate":
+                        msg = "그리퍼 자세 조정 중..."
+                    elif p == "move_xy":
+                        msg = "목표 XY로 이동 중 (Z 유지)..."
+                    elif p == "move_z":
+                        msg = "목표 Z로 이동 중..."
+                    else:
+                        msg = "목표로 이동 중..."
                     self.root.after(0, lambda m=msg: self.status_var.set(m))
 
                 # 이동 전 그리퍼 열기 완료 → 그다음 자세/이동
