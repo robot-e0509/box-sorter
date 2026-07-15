@@ -14,11 +14,6 @@
 
 ![시스템 구조](docs/architecture.png)
 
-> 다이어그램 원본: [`docs/architecture.excalidraw`](docs/architecture.excalidraw)
-
-> **현재 상태**: 로봇 연결 확인 단계입니다.
-> 각 팀이 자기 폴더에서 작업한 뒤 나중에 합칠 예정이라, 아직 공용 코드는 없습니다.
-
 ## 시작하기
 
 **[→ 설치 및 실행 가이드 (docs/RUN.md)](docs/RUN.md)**
