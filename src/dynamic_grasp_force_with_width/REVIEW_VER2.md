@@ -14,11 +14,11 @@
 |---|---|---|
 | 무게 측정 held-out 검증 | ✅ 완료 | `FINDINGS_85mm.md`, 실력 ±20g (in-sample ±6g는 과장이었음) |
 | 파지력 회귀 (`current = A·질량 + B`) | ❌ 미착수 | `try_current()`/`accept()`/`reject()`/`planner.fit(trials)` — 로봇 필요, 오늘 못 함 |
-| 실제로 다른 무게 상자 옮기기 (무게 기반 전체 흐름) | ❌ 미착수 | `weight_calib.json` 팀원분께 받아야 `pick_with_weight_feedback()` 실행 가능 |
+| 실제로 다른 무게 상자 옮기기 (무게 기반 전체 흐름) | ❌ 미착수 | `weight_calib.json` 필요함`pick_with_weight_feedback()` 실행 가능 |
 | `TOOL_COG`/`TCP_POS` 실측 | ❌ 미착수 | 아직 근사값 (`[0,0,60]`, `[0,0,150,...]`) |
-| **이동 안전성** (놓침 감지·release 확인·재시도) | 🆕 v3로 신규 대응 | REVIEW.md엔 없던 항목. v2가 픽·리프트까지만 다뤄서 이동 구간이 비어있었음 |
+| **이동 안전성** (놓침 감지·release 확인·재시도) | 🆕 v3로 신규 대응
 
-**정리: 오늘은 REVIEW.md의 원래 할 일(파지력 데이터, TCP 실측)은 진척이 없고, 대신 거기 없던 이동 안전성을 새로 만들었습니다.** 파지력 데이터 수집은 로봇 잡으면 여전히 1순위로 남아있습니다.
+**정리: 파지력 데이터, TCP 실측은 현재 값을 유지하되, 대신 거기 없던 이동 안전성이 포함되었습니다.** 파지력 데이터 수집은 여전히 실측 데이터가 필요합니다.
 
 ---
 
@@ -49,7 +49,7 @@ TransportTest(move='3', place_pos='서울')      # 3단계: 놓기 구역 키워
 
 ---
 
-## 3. OCR팀 코드에서 확인한 것 — 좌표 인터페이스
+## 3. 좌표 인터페이스
 
 실제 repo 로컬 클론(`doosan_ws~`, `origin/main`과 동기화됨)의 `yh/hand_eye_calib.py`
 · `yh/click_and_move.py` · `yh/ocr_click_and_move.py` 를 확인했습니다.
