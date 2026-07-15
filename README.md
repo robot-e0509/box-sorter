@@ -41,14 +41,15 @@ doosan_ws/
 ├── docs/
 │   ├── RUN.md                    설치 · 실행 · 트러블슈팅
 │   └── architecture.excalidraw   시스템 구조 다이어그램
-├── notebooks/
-│   └── 00_robot_connect.ipynb    로봇 연결 · 좌표 확인
+├── example_code/                 로봇 연결 · 좌표 확인 등 예제 노트북
+│   ├── doosan_example.ipynb      두산 API 예제
+│   └── pick_and_place_hard_coding.ipynb  고정 좌표 픽앤플레이스
 └── src/
     ├── doosan-robot2/            [외부] 두산 공식 ROS2 드라이버
     │                             DSR_ROBOT2.py 패치 적용됨 — 건드리지 마세요
     ├── dsr_study/                [외부] RH-P12-RN 그리퍼 서비스
-    │
-    └── (여기에 각 팀 폴더를 만듭니다)
+    ├── yh/                       OCR · 핸드-아이 캘리브레이션 (라벨 인식 · 클릭 이동)
+    └── dynamic_grasp_force_with_width/  폭·무게 기반 동적 파지 강도 계산 · 실험 기록
 ```
 
 ## 프로젝트 목표
