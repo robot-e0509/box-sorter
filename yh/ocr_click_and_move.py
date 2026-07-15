@@ -58,7 +58,10 @@ from doosan_client import (
     GRIPPER_TCP_POS,
     HOME_POSJ_DEG,
     TARGET_Z_UP_MM,
+    canonicalize_down_ori,
+    effective_tool_x_yaw_deg,
     gripper_ori_with_yaw,
+    normalize_yaw_deg,
 )
 
 import easyocr_contour as ocr
@@ -268,47 +271,122 @@ def hit_test_result(results: list[dict], px: int, py: int) -> int | None:
     return hits[0][1]
 
 
-def contour_skew_image_deg(box_pts: np.ndarray, *, along_short_side: bool = True) -> float:
+def normalize_rotation_lt180_deg(angle_deg: float) -> float:
     """
-    원본(축정렬·이미지 +x) 대비 컨투어 방향각 [deg], 범위 (−90, 90].
-
-    along_short_side=True (기본):
-      단축(짧은 변) 방향 — 그리퍼가 짧은 쪽을 집도록 yaw에 사용.
-      정각(축정렬) 긴 직사각형이면 장축이 아니라 짧은 변 쪽으로 90° 보정.
-    along_short_side=False:
-      장축(긴 변) 방향.
+    임의 각 → (−180, 180].
+    180° 미만이면 그대로, 180° 이상이면 반대 방향(−360°)으로 짧은 쪽 회전.
     """
-    pts = np.asarray(box_pts, dtype=np.float32).reshape(-1, 2)
-    if pts.shape[0] < 3:
-        return 0.0
-    raw = cv2.minAreaRect(pts)
-    (_c, (rw, rh), angle) = ocr.normalize_min_area_rect(raw)
-    a = float(angle)  # 장축 [0, 180)
-    # 거의 정사각이면 장/단 구분이 무의미 — 장축 유지
-    if along_short_side and float(rw) > float(rh) * 1.05:
-        a += 90.0  # 단축 = 장축 ⊥
-    # (−90, 90] 로 정규화
-    while a > 90.0:
-        a -= 180.0
-    while a <= -90.0:
-        a += 180.0
+    a = float(angle_deg) % 360.0
+    if a >= 180.0:
+        a -= 360.0
     return float(a)
 
 
-def contour_yaw_base_deg(
-    box_pts: np.ndarray, R_cam2base: np.ndarray, *, along_short_side: bool = True
-) -> tuple[float, float]:
+def _longest_edge_dir_image_deg(box_pts: np.ndarray) -> float:
     """
-    컨투어 방향 → (이미지 스큐각, 로봇 base XY yaw).
-    기본은 짧은 변(단축) 기준 — 그리퍼가 짧은 쪽을 집도록.
-    RealSense/OpenCV: 이미지 u→cam X, v→cam Y, R로 base에 투영.
+    원본 이미지 박스의 가장 긴 변 방향각 [deg], (−180, 180].
+    (= 가로로 쓰인 글자의 줄/판독 방향에 해당)
     """
-    skew = contour_skew_image_deg(box_pts, along_short_side=along_short_side)
-    rad = math.radians(skew)
+    pts = np.asarray(box_pts, dtype=np.float64).reshape(-1, 2)
+    if pts.shape[0] < 2:
+        return 0.0
+    if pts.shape[0] >= 4:
+        # 사각형 꼭짓점 기준 최장 변
+        best_len = -1.0
+        best_ang = 0.0
+        n = pts.shape[0]
+        for i in range(n):
+            d = pts[(i + 1) % n] - pts[i]
+            leng = float(np.hypot(d[0], d[1]))
+            if leng > best_len:
+                best_len = leng
+                best_ang = math.degrees(math.atan2(float(d[1]), float(d[0])))
+        return normalize_yaw_deg(best_ang)
+
+    raw = cv2.minAreaRect(pts.astype(np.float32))
+    (_c, (_rw, _rh), angle) = ocr.normalize_min_area_rect(raw)
+    return normalize_rotation_lt180_deg(float(angle))
+
+
+def text_line_direction_image_deg(
+    result: dict | None,
+    box_pts: np.ndarray | None = None,
+) -> float:
+    """
+    원본 이미지상 글자 줄 방향 (장축) [deg], (−180, 180].
+
+    우선순위: text_box_pts(승격 전 글자박스) → box_pts → 인자 box_pts
+    OCR 정자각은 θ / θ+180 선택에만 사용.
+    """
+    pts_src = None
+    if result is not None:
+        pts_src = result.get("text_box_pts")
+        if pts_src is None:
+            pts_src = result.get("box_pts")
+    if pts_src is None:
+        pts_src = box_pts
+    pts = np.asarray(pts_src if pts_src is not None else [], dtype=np.float32)
+    if pts.size < 4:
+        return 0.0
+
+    geom = _longest_edge_dir_image_deg(pts)
+    cand = [normalize_yaw_deg(geom), normalize_yaw_deg(geom + 180.0)]
+
+    ocr_hint: float | None = None
+    if result is not None:
+        if result.get("angle") is not None:
+            ocr_hint = normalize_rotation_lt180_deg(float(result["angle"]))
+        elif result.get("base_angle") is not None:
+            ocr_hint = normalize_rotation_lt180_deg(
+                float(result["base_angle"]) + float(result.get("extra_rot") or 0.0)
+            )
+
+    if ocr_hint is None:
+        return cand[0]
+
+    best = cand[0]
+    best_d = abs(normalize_yaw_deg(cand[0] - ocr_hint))
+    for c in cand[1:]:
+        d = abs(normalize_yaw_deg(c - ocr_hint))
+        if d < best_d:
+            best, best_d = c, d
+    return float(best)
+
+
+def image_dir_to_base_yaw_deg(
+    skew_img_deg: float, R_cam2base: np.ndarray
+) -> float:
+    """
+    이미지 평면 방향각 → 로봇 base XY yaw.
+    RealSense/OpenCV: u→cam X, v→cam Y(+아래).
+    """
+    rad = math.radians(float(skew_img_deg))
     d_cam = np.array([math.cos(rad), math.sin(rad), 0.0], dtype=np.float64)
     d_base = np.asarray(R_cam2base, dtype=np.float64).reshape(3, 3) @ d_cam
-    yaw = math.degrees(math.atan2(float(d_base[1]), float(d_base[0])))
-    return float(skew), float(yaw)
+    # XY 평면으로 투영 (카메라 기울기 보정)
+    xy = d_base[:2]
+    n = float(np.linalg.norm(xy))
+    if n < 1e-9:
+        return 0.0
+    return float(math.degrees(math.atan2(float(xy[1]), float(xy[0]))))
+
+
+def contour_yaw_base_deg(
+    box_pts: np.ndarray,
+    R_cam2base: np.ndarray,
+    *,
+    result: dict | None = None,
+) -> tuple[float, float, float]:
+    """
+    원본 이미지 글자 줄에 수직으로 집기.
+
+    반환: (글자줄_이미지각, 수직집기_이미지각, base_yaw)
+    """
+    line_deg = text_line_direction_image_deg(result, box_pts)
+    # 글자에 수직 = 장축 + 90°
+    perp_deg = normalize_yaw_deg(line_deg + 90.0)
+    yaw = image_dir_to_base_yaw_deg(perp_deg, R_cam2base)
+    return float(line_deg), float(perp_deg), float(yaw)
 
 
 class OcrClickMoveApp:
@@ -629,14 +707,17 @@ class OcrClickMoveApp:
             return
 
         z_move = float(Pb[2]) + float(TARGET_Z_UP_MM)
-        skew_img, yaw_base = contour_yaw_base_deg(r["box_pts"], self.R)
-        ori = gripper_ori_with_yaw(yaw_base)
+        line_img, skew_img, yaw_base = contour_yaw_base_deg(
+            r["box_pts"], self.R, result=r
+        )
+        ori = canonicalize_down_ori(gripper_ori_with_yaw(yaw_base))
         self.info_var.set(
             f"[{idx}] '{r['text']}'  conf={r['conf']:.2f}  "
             f"pix=({cx:.0f},{cy:.0f})  "
             f"surface_Z={Pb[2]:.1f}  move_Z={z_move:.1f}  "
-            f"skew(단축)={skew_img:.1f}°  yaw={yaw_base:.1f}°  "
-            f"ori=({ori[0]:.1f},{ori[1]:.1f},{ori[2]:.1f})"
+            f"글자={line_img:.1f}° ⊥={skew_img:.1f}°  yaw={yaw_base:.1f}°  "
+            f"ori=[{ori[0]:.1f},{ori[1]:.1f},{ori[2]:.1f}] "
+            f"toolX={effective_tool_x_yaw_deg(ori):.1f}°"
         )
         print(self.info_var.get())
 
@@ -775,8 +856,11 @@ class OcrClickMoveApp:
             return None
         x, y, z_surf = float(Pb[0]), float(Pb[1]), float(Pb[2])
         z = z_surf + float(TARGET_Z_UP_MM)
-        skew_img, yaw_base = contour_yaw_base_deg(r["box_pts"], self.R)
-        ori = gripper_ori_with_yaw(yaw_base)
+        line_img, skew_img, yaw_base = contour_yaw_base_deg(
+            r["box_pts"], self.R, result=r
+        )
+        ori = canonicalize_down_ori(gripper_ori_with_yaw(yaw_base))
+        r["text_line_img_deg"] = line_img
         r["skew_img_deg"] = skew_img
         r["yaw_base_deg"] = yaw_base
         return [x, y, z, float(ori[0]), float(ori[1]), float(ori[2])]
@@ -826,8 +910,11 @@ class OcrClickMoveApp:
             return None
         x, y, z_surf = float(Pb[0]), float(Pb[1]), float(Pb[2])
         z = z_surf + float(TARGET_Z_UP_MM)
-        skew_img, yaw_base = contour_yaw_base_deg(r["box_pts"], self.R)
-        ori = gripper_ori_with_yaw(yaw_base)
+        line_img, skew_img, yaw_base = contour_yaw_base_deg(
+            r["box_pts"], self.R, result=r
+        )
+        ori = canonicalize_down_ori(gripper_ori_with_yaw(yaw_base))
+        r["text_line_img_deg"] = line_img
         r["skew_img_deg"] = skew_img
         r["yaw_base_deg"] = yaw_base
         return [x, y, z, float(ori[0]), float(ori[1]), float(ori[2])]
@@ -1269,6 +1356,7 @@ class OcrClickMoveApp:
             else target[2]
         )
         skew = float(r.get("skew_img_deg", 0.0)) if r is not None else 0.0
+        line = float(r.get("text_line_img_deg", 0.0)) if r is not None else 0.0
         yaw = float(r.get("yaw_base_deg", 0.0)) if r is not None else 0.0
         print()
         print("=" * 50)
@@ -1280,7 +1368,9 @@ class OcrClickMoveApp:
             f"→ tip_Z={target[2]:.1f} mm"
         )
         print(
-            f"컨투어 각도(짧은 변): image_skew={skew:.1f}° → base_yaw={yaw:.1f}°"
+            f"글자⊥ 집기: 원본글자줄={line:.1f}° → ⊥={skew:.1f}° "
+            f"→ base_yaw={yaw:.1f}° → ori={target[3:6]} "
+            f"(toolX={effective_tool_x_yaw_deg(target[3:6]):.1f}°)"
         )
         print(
             "실행 target (자세 → XY → Z): "

@@ -505,6 +505,15 @@ def _merge_two_text_objects(a: dict, b: dict, img_area: float) -> dict:
             "size_mm": None,
         }
     )
+    # 합친 뒤에도 OCR 정자각·글자박스 유지 (conf 높은 쪽)
+    prefer = a if float(a.get("conf", 0)) >= float(b.get("conf", 0)) else b
+    for k in ("angle", "base_angle", "extra_rot", "text_box_pts"):
+        if prefer.get(k) is not None:
+            out[k] = prefer[k]
+        elif a.get(k) is not None:
+            out[k] = a[k]
+        elif b.get(k) is not None:
+            out[k] = b[k]
     return out
 
 
@@ -806,6 +815,8 @@ def promote_text_to_outer_label(
         return obj
 
     out = dict(obj)
+    # 방향/정자각 계산용 — 승격 전 글자 박스 유지
+    out["text_box_pts"] = np.asarray(obj["box_pts"], dtype=np.float32).copy()
     out["contour"] = chosen["contour"]
     out["box_pts"] = chosen["box_pts"]
     out["center"] = chosen["center"]

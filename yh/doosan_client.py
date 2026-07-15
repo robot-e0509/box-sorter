@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 
 DOOSAN_WS = Path("/home/newuser/ocr/doosan_ws")
 DEFAULT_ROBOT_ID = "dsr01"
@@ -34,7 +36,7 @@ DR_MV_MOD_ABS = 0
 # Z는 실측 손가락 tip까지 거리로 조정하세요.
 # ---------------------------------------------------------------------------
 GRIPPER_TCP_NAME = "rh_p12_rn"
-GRIPPER_TCP_POS = [0.0, 0.0, 142.0, 0.0, 0.0, 0.0] #154 -> 152
+GRIPPER_TCP_POS = [0.0, 0.0, 136.0, 0.0, 0.0, 0.0] #154 -> 152
 # 감지된 표면 Z보다 tip을 이만큼 위로 (그리퍼 높이 감안, mm)
 # 기본값 = TCP Z(=그리퍼 길이). 더/덜 올리고 싶으면 여기만 조정.
 GRIPPER_HEIGHT_MM = float(GRIPPER_TCP_POS[2])
@@ -45,11 +47,12 @@ ORI_TOL_DEG = 5.0
 # 기동 전 기본자세 (조인트 deg, J1..J6)
 HOME_POSJ_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 HOME_POSJ_TOL_DEG = 2.0
-# 컨투어 yaw → posx: True면 [yaw, 180, 0], False면 [0, 180, yaw]
-GRIPPER_YAW_ON_RX = False
+# Ry=180°(하향) ZYZ 특이점: [0,180,yaw] ≡ [-yaw,180,0]
+# → 항상 정규형 [yaw, 180, 0] 사용
+GRIPPER_YAW_ON_RX = True
 GRIPPER_YAW_SIGN = 1.0
-# 짧은 변 집기용. 이미지→base 변환 후에도 ±90이 더 맞으면 여기 조정.
-GRIPPER_YAW_OFFSET_DEG = 90.0
+# 손가락 축이 90° 어긋나면 ±90 조정
+GRIPPER_YAW_OFFSET_DEG = 0.0
 
 # RH-P12-RN stroke (dsr_gripper): 0=완전닫힘, 750=완전열림
 GRIPPER_POS_OPEN = 750
@@ -72,14 +75,64 @@ def normalize_yaw_deg(yaw: float) -> float:
     return y
 
 
-def gripper_ori_with_yaw(yaw_deg: float) -> list[float]:
-    """하향 자세 유지 + yaw(컨투어 각도) 적용한 posx ori [rx,ry,rz]."""
-    yaw = normalize_yaw_deg(
-        float(GRIPPER_YAW_SIGN) * float(yaw_deg) + float(GRIPPER_YAW_OFFSET_DEG)
-    )
-    if GRIPPER_YAW_ON_RX:
-        return [yaw, float(GRIPPER_DOWN_ORI_DEG[1]), float(GRIPPER_DOWN_ORI_DEG[2])]
-    return [float(GRIPPER_DOWN_ORI_DEG[0]), float(GRIPPER_DOWN_ORI_DEG[1]), yaw]
+def _Rz_deg(a: float) -> np.ndarray:
+    r = math.radians(float(a))
+    c, s = math.cos(r), math.sin(r)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def _Ry_deg(a: float) -> np.ndarray:
+    r = math.radians(float(a))
+    c, s = math.cos(r), math.sin(r)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
+
+
+def euler_zyz_deg_to_R(rx: float, ry: float, rz: float) -> np.ndarray:
+    """두산 기본 Euler ZYZ: R = Rz(rx) @ Ry(ry) @ Rz(rz)."""
+    return _Rz_deg(rx) @ _Ry_deg(ry) @ _Rz_deg(rz)
+
+
+def ori_rot_diff_deg(ori_a: list[float], ori_b: list[float]) -> float:
+    """두 Euler(ZYZ) 자세의 실제 회전각 차이 [deg] (특이점 표현 무시)."""
+    Ra = euler_zyz_deg_to_R(float(ori_a[0]), float(ori_a[1]), float(ori_a[2]))
+    Rb = euler_zyz_deg_to_R(float(ori_b[0]), float(ori_b[1]), float(ori_b[2]))
+    R = Ra.T @ Rb
+    tr = float(np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0))
+    return float(math.degrees(math.acos(tr)))
+
+
+def canonicalize_down_ori(ori_deg: list[float]) -> list[float]:
+    """
+    하향(Ry≈±180) 자세를 정규형 [yaw, 180, 0] 으로 변환.
+    특이점 동등식: [a, 180, c] ≡ [a-c, 180, 0]
+    """
+    rx, ry, rz = float(ori_deg[0]), float(ori_deg[1]), float(ori_deg[2])
+    if abs(abs(ry) - 180.0) <= 15.0:
+        yaw = normalize_yaw_deg(rx - rz)
+        return [yaw, 180.0, 0.0]
+    return [rx, ry, rz]
+
+
+def effective_tool_x_yaw_deg(ori_deg: list[float]) -> float:
+    """하향 ori의 툴 X 축이 base XY에서 가리키는 각도."""
+    R = euler_zyz_deg_to_R(float(ori_deg[0]), float(ori_deg[1]), float(ori_deg[2]))
+    x = R[:, 0]
+    return float(math.degrees(math.atan2(float(x[1]), float(x[0]))))
+
+
+def gripper_ori_with_yaw(
+    yaw_deg: float, *, offset_deg: float | None = None
+) -> list[float]:
+    """
+    하향 자세 + base XY yaw(원하는 툴X 방향각) → posx ori [yaw,180,0].
+
+    Rzyz(A,180,0) 의 tool X ≈ [-cos(A), -sin(A), 0]
+    → tool X 각도 = A+180° → A = desired - 180°
+    """
+    off = float(GRIPPER_YAW_OFFSET_DEG if offset_deg is None else offset_deg)
+    desired = normalize_yaw_deg(float(GRIPPER_YAW_SIGN) * float(yaw_deg) + off)
+    A = normalize_yaw_deg(desired - 180.0)
+    return [A, float(GRIPPER_DOWN_ORI_DEG[1]), 0.0]
 
 
 def _ensure_doosan_ws_pythonpath(ws: Path = DOOSAN_WS) -> None:
@@ -641,17 +694,14 @@ class DoosanClient:
         ori_b: list[float],
         tol_deg: float = ORI_TOL_DEG,
     ) -> bool:
-        """두 Euler 자세가 허용각 이내인지 (ry ±180 동등 표현 허용)."""
+        """
+        두 Euler 자세가 허용각 이내인지.
+        Ry≈180 ZYZ 특이점에서 [0,180,yaw]≡[-yaw,180,0] 이므로
+        성분 비교가 아니라 회전행렬 각도로 판정.
+        """
         if len(ori_a) < 3 or len(ori_b) < 3:
             return False
-        rx_ok = self._angle_diff_deg(ori_a[0], ori_b[0]) <= tol_deg
-        rz_ok = self._angle_diff_deg(ori_a[2], ori_b[2]) <= tol_deg
-        ry_a, ry_b = float(ori_a[1]), float(ori_b[1])
-        ry_ok = (
-            self._angle_diff_deg(ry_a, ry_b) <= tol_deg
-            or self._angle_diff_deg(ry_a, -ry_b) <= tol_deg
-        )
-        return rx_ok and ry_ok and rz_ok
+        return ori_rot_diff_deg(ori_a, ori_b) <= float(tol_deg)
 
     def is_gripper_down(
         self,
@@ -674,15 +724,19 @@ class DoosanClient:
     ) -> bool:
         """
         현재 TCP XYZ는 유지하고 그리퍼(자세)만 목표 ori로 맞춤.
-        이미 가까우면 생략(True). 완료 후 잠시 정착 대기.
+        하향 목표는 [yaw,180,0] 으로 정규화. 완료 후 실제 툴X yaw 로그.
         """
         cur = self.get_posx_mm_deg()
         if cur is None or len(cur) < 6:
             print("[로봇] rotate_gripper_to: pose 읽기 실패")
             return False
-        ori = [float(v) for v in ori_deg[:3]]
-        if not force and self.ori_close(cur[3:6], ori):
-            print("[로봇] 이미 목표 그리퍼 자세 — 회전 생략")
+        ori = canonicalize_down_ori([float(v) for v in ori_deg[:3]])
+        diff = ori_rot_diff_deg(cur[3:6], ori)
+        if not force and diff <= ORI_TOL_DEG:
+            print(
+                f"[로봇] 이미 목표 그리퍼 자세 (Δ={diff:.1f}°) — 회전 생략  "
+                f"cur_toolX_yaw={effective_tool_x_yaw_deg(cur[3:6]):.1f}°"
+            )
             return True
         rot_pose = [
             float(cur[0]),
@@ -694,7 +748,9 @@ class DoosanClient:
         ]
         print(
             "[로봇] 그리퍼 자세 조정 (위치 고정) → "
-            f"ori=[{ori[0]:.1f}, {ori[1]:.1f}, {ori[2]:.1f}]"
+            f"ori=[{ori[0]:.1f}, {ori[1]:.1f}, {ori[2]:.1f}]  "
+            f"(정규형 [yaw,180,0], 목표툴X={effective_tool_x_yaw_deg(ori):.1f}°, "
+            f"현재Δ={diff:.1f}°)"
         )
         if vel is None:
             vel = [30.0, 30.0]
@@ -702,7 +758,21 @@ class DoosanClient:
             acc = [30.0, 30.0]
         ok = self.movel(rot_pose, vel=vel, acc=acc)
         if ok:
-            time.sleep(0.15)
+            time.sleep(0.2)
+            after = self.get_posx_mm_deg()
+            if after is not None and len(after) >= 6:
+                adiff = ori_rot_diff_deg(after[3:6], ori)
+                print(
+                    f"[로봇] 회전 후 pose ori="
+                    f"[{after[3]:.1f},{after[4]:.1f},{after[5]:.1f}]  "
+                    f"toolX_yaw={effective_tool_x_yaw_deg(after[3:6]):.1f}°  "
+                    f"목표대비Δ={adiff:.1f}°"
+                )
+                if adiff > max(ORI_TOL_DEG * 2.0, 10.0):
+                    print(
+                        "[로봇] 경고: 회전 후에도 목표 자세와 큼 — "
+                        "bringup Euler(ZYZ)·싱귤래리티/관절한계 확인"
+                    )
         return ok
 
     def is_at_home_posj(
@@ -781,11 +851,11 @@ class DoosanClient:
         tx = float(xyz_mm[0])
         ty = float(xyz_mm[1])
         if ori_deg is not None:
-            ori = [float(v) for v in ori_deg[:3]]
+            ori = canonicalize_down_ori([float(v) for v in ori_deg[:3]])
         elif yaw_deg is not None:
-            ori = gripper_ori_with_yaw(float(yaw_deg))
+            ori = canonicalize_down_ori(gripper_ori_with_yaw(float(yaw_deg)))
         else:
-            ori = [float(v) for v in GRIPPER_DOWN_ORI_DEG]
+            ori = list(GRIPPER_DOWN_ORI_DEG)
 
         def _phase(name: str) -> None:
             if phase_cb is None:
