@@ -46,7 +46,7 @@ DRAW_MAX_AREA_RATIO = 0.35
 # 그려질/승격 가능 외곽: 원본 기준 가로·세로 상한 (라벨 전체)
 MAX_SIDE_PX = 220
 # 글자 박스만 이보다 작으면 외곽 승격 시도
-MIN_PROMOTE_AREA_RATIO = 1.25  # 외곽면적 >= 글자박스면적 * 이 값
+MIN_PROMOTE_AREA_RATIO = 1.15  # 외곽면적 >= 글자박스면적 * 이 값
 MAX_CANDIDATES = 80 #default 50
 DESKEW_PAD = 8
 # 흰 라벨 flood 시 배경 대비 (밝기)
@@ -60,7 +60,7 @@ SAME_HEIGHT_TOL_MM = 40.0
 OCR_EXTRA_ANGLES_DEG = (0, 45, 90, 135, 180, 225, 270, 315)
 DEPTH_SAMPLE_R = 3
 # 같은 물체로 볼 중심 거리 (작을수록 더 많이 분리 유지)
-DUP_CENTER_PX = 18
+DUP_CENTER_PX = 20
 # IoU 이하면 서로 다른 객체로 유지
 DUP_IOU_MAX = 0.35
 # 최종 외곽: 겹치거나 거의 붙어 있으면 하나로 합침

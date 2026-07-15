@@ -7,17 +7,17 @@ click_and_move.py 의 RealSense + Doosan movel 을 결합합니다.
 이동 기준
   - hand_eye_data/cam2base.npz → 로봇 base XYZ
   - doosan_ws TCP(그리퍼 tip) + 하향 정자세 후
-    자세 조정 → 목표 XY(현재 Z 유지) → 목표 Z 순서로 movel
+    (목표 X<0 이면 J1 선회전) → 자세 조정 → 목표 XY(현재 Z 유지) → 목표 Z
 
 조작
   [OCR 실행] : 현재 프레임에서 글자 라벨 검출·base XYZ 계산
   영상 클릭  : 해당 외곽 컨투어 선택 (중심 XYZ 표시)
   모드       : [수동조작모드] 펜던트교시 / [자동모드] 앱 이동
-  [기본자세] : J1..J6 = 0,0,90,0,90,0 로 movej 교정
-  [자동물류] : 열기→픽업→닫기→홈→수원/서울 구역 놓기(저장Z)→열기→홈
-               수원=(350,500)±150 / 서울=(370,0)±150 (base mm)
+  [기본자세] : J2~J6 먼저 기본값 → 이후 J1 맞춤 (0,0,60,0,120,0)
+  [자동물류] : 열기→픽업→커스텀닫기(설정값)→홈→수원/서울/충주 놓기→열기→홈
+               여·닫기 후 약 4초 대기 / 서울=(-540,-240) 수원=(-540,30) 충주=(-540,330)
                (열기/닫기 완료·정착 후 팔 이동)
-  [실행]     : 현 위치에서 그리퍼 회전 → tip 목표로 이동
+  [실행]     : tip 목표로 XY→Z 이동 (완료 후 그리퍼 여닫기 가능)
   조인트     : J1~J6 표시·수정 후 [조인트 이동]
   그리퍼 TCP : tip 기준 base X,Y,Z (mm) 표시 (읽기/폴링)
   그리퍼     : 열기 / 닫기 / 커스텀닫기(기본 반만) / 설정
@@ -90,19 +90,27 @@ ROBOT_MODEL = DEFAULT_ROBOT_MODEL
 AUTO_LOGISTICS_J1_DEG = -50.0
 AUTO_LOGISTICS_VEL_J = 25.0
 AUTO_LOGISTICS_ACC_J = 25.0
-# 인식 글자 키워드 → 놓기 구역 (base mm). center + half of size
-# 수원: (350,500) 중심 300×300 / 서울: (370,0) 중심 300×300
+# 자동물류 그리퍼 여·닫기 후 정착 대기 (초)
+AUTO_LOGISTICS_GRIPPER_SETTLE_S = 4.0
+# 인식 글자 키워드 → 놓기 구역 중심 (base mm)
+# 서울=(-540,-240) / 수원=(-540,30) / 충주=(-540,330), size=구역 판정용(±size/2)
 PLACE_ZONES: list[dict] = [
     {
-        "keyword": "수원",
-        "cx": 350.0,
-        "cy": -500.0,
+        "keyword": "서울",
+        "cx": -550.0,
+        "cy": -240.0,
         "size": 300.0,
     },
     {
-        "keyword": "서울",
-        "cx": 370.0,
-        "cy": 0.0,
+        "keyword": "수원",
+        "cx": -550.0,
+        "cy": 30.0,
+        "size": 300.0,
+    },
+    {
+        "keyword": "충주",
+        "cx": -550.0,
+        "cy": 330.0,
         "size": 300.0,
     },
 ]
@@ -1014,8 +1022,9 @@ class OcrClickMoveApp:
     ) -> tuple[bool, str]:
         """
         1사이클:
-          열기(완료) → 자세→픽업이동 → 커스텀닫기(완료) → 기본자세
-          → 글자(수원/서울) 놓기 구역으로 XY이동 + 저장Z → 열기(완료) → 기본자세
+          (홈에서) 열기·정착 → 픽업이동(XY→Z) 완료 후 커스텀닫기·정착
+          → 기본자세 → 놓기이동(XY→Z) 완료 후 열기·정착 → 기본자세
+        그리퍼 여·닫기는 반드시 해당 팔 이동이 끝난 뒤에만 수행.
         """
         r = self.results[idx]
         target = self._target_posx_for_idx(idx)
@@ -1025,7 +1034,7 @@ class OcrClickMoveApp:
         text = str(r.get("text", "?"))
         if resolve_place_xy(text) is None:
             return False, (
-                f"[{idx}] '{text}' — 놓기 구역 키워드(수원/서울) 없음, 건너뜀"
+                f"[{idx}] '{text}' — 놓기 구역 키워드(수원/서울/충주) 없음, 건너뜀"
             )
         print()
         print("=" * 50)
@@ -1039,27 +1048,41 @@ class OcrClickMoveApp:
         if not ok_ws:
             return False, f"픽업 작업영역 밖 — {ws_msg}"
 
-        # 1) 이동 전 그리퍼 열기 (완료·정착 후 이동)
+        settle = float(AUTO_LOGISTICS_GRIPPER_SETTLE_S)
+        self.robot.set_custom_close(self.custom_close_pos, self.custom_close_current)
+
+        # 0) 홈/안전 위치에서만 열기 (이동 전 준비 — 접근 중에는 그리퍼 고정)
         self.root.after(
             0,
             lambda: self.status_var.set(
-                f"자동물류 [{num}/{total}] '{text}' → 이동 전 그리퍼 열기"
+                f"자동물류 [{num}/{total}] '{text}' → "
+                f"이동 전 열기(정착 {settle:.0f}s)"
             ),
         )
-        if not self.robot.gripper_open():
+        print(f"[자동물류] [준비] 그리퍼 열기 … (정착 {settle:.1f}s)")
+        if not self.robot.gripper_open(settle_s=settle):
             return False, f"[{idx}] 픽업 전 그리퍼 열기 실패"
 
         def pick_phase(p: str, _n=num, _t=total, _lab=text) -> None:
-            if p == "rotate":
+            if p == "j1":
+                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → J1 선회전 (X<0)"
+            elif p == "rotate":
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 그리퍼 자세 조정"
             elif p == "move_xy":
-                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 XY 이동"
+                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 XY"
             elif p == "move_z":
-                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 Z 이동"
+                msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 Z"
             else:
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 픽업 이동"
             self.root.after(0, lambda m=msg: self.status_var.set(m))
 
+        self.root.after(
+            0,
+            lambda: self.status_var.set(
+                f"자동물류 [{num}/{total}] '{text}' → 픽업 이동 (XY→Z)"
+            ),
+        )
+        print("[자동물류] 픽업 이동 시작 (XY → Z, 그리퍼 동작 없음)")
         if not self.robot.movel_gripper(
             target[:3],
             vel=[VEL_XY, VEL_ORI],
@@ -1071,16 +1094,24 @@ class OcrClickMoveApp:
             phase_cb=pick_phase,
         ):
             return False, f"[{idx}] 픽업 이동 실패"
+        print("[자동물류] 픽업 이동 완료 → 이제 커스텀닫기")
 
-        # 2) 닫기 완료 후 팔 이동
+        # 1) 픽업 도착 후에만 커스텀닫기
         self.root.after(
             0,
             lambda: self.status_var.set(
-                f"자동물류 [{num}/{total}] '{text}' → 커스텀닫기 (완료 대기)"
+                f"자동물류 [{num}/{total}] '{text}' → "
+                f"커스텀닫기(pos={self.custom_close_pos}, 정착 {settle:.0f}s)"
             ),
         )
-        if not self.robot.gripper_custom_close():
+        print(
+            f"[자동물류] 커스텀닫기 pos={self.custom_close_pos} "
+            f"current={self.custom_close_current} … "
+            f"(정착 {settle:.1f}s)"
+        )
+        if not self.robot.gripper_custom_close(settle_s=settle):
             return False, f"[{idx}] 커스텀닫기 실패"
+        print("[자동물류] 커스텀닫기 완료")
 
         self.root.after(
             0,
@@ -1097,7 +1128,7 @@ class OcrClickMoveApp:
         if place is None:
             return False, (
                 f"[{idx}] 놓기 구역 없음 — 글자 '{text}'에 "
-                f"'수원'/'서울'이 필요합니다"
+                f"'수원'/'서울'/'충주'가 필요합니다"
             )
         place_x, place_y, place_key = place
         bounds = place_zone_bounds(place_key)
@@ -1117,7 +1148,12 @@ class OcrClickMoveApp:
         place_ori = [float(cur[3]), float(cur[4]), float(cur[5])]
 
         def place_phase(p: str, _n=num, _t=total, _lab=text, _k=place_key) -> None:
-            if p == "rotate":
+            if p == "j1":
+                msg = (
+                    f"자동물류 [{_n}/{_t}] '{_lab}' → "
+                    f"J1 선회전 ({_k}, X<0)"
+                )
+            elif p == "rotate":
                 msg = f"자동물류 [{_n}/{_t}] '{_lab}' → 놓기 전 그리퍼 자세"
             elif p == "move_xy":
                 msg = (
@@ -1136,6 +1172,13 @@ class OcrClickMoveApp:
                 )
             self.root.after(0, lambda m=msg: self.status_var.set(m))
 
+        self.root.after(
+            0,
+            lambda: self.status_var.set(
+                f"자동물류 [{num}/{total}] '{text}' → 놓기 이동 (XY→Z)"
+            ),
+        )
+        print("[자동물류] 놓기 이동 시작 (XY → Z, 그리퍼 동작 없음)")
         if not self.robot.movel_gripper(
             [float(place_x), float(place_y), float(z_saved)],
             vel=[VEL_XY, VEL_ORI],
@@ -1147,6 +1190,7 @@ class OcrClickMoveApp:
             phase_cb=place_phase,
         ):
             return False, f"[{idx}] '{place_key}' 구역 놓기 이동 실패"
+        print("[자동물류] 놓기 이동 완료 → 이제 그리퍼 열기")
 
         # 도착점이 구역 안인지 확인 (중심 배치가 기본)
         arrived = self.robot.get_posx_mm_deg()
@@ -1160,15 +1204,18 @@ class OcrClickMoveApp:
                     f"[{ymin:.0f}~{ymax:.0f}] 밖"
                 )
 
-        # 3) 열기 완료 후 기본자세 복귀
+        # 놓기 도착 후에만 열기
         self.root.after(
             0,
             lambda: self.status_var.set(
-                f"자동물류 [{num}/{total}] '{text}' → 그리퍼 열기 (완료 대기)"
+                f"자동물류 [{num}/{total}] '{text}' → 그리퍼 열기 "
+                f"(정착 {settle:.0f}s)"
             ),
         )
-        if not self.robot.gripper_open():
+        print(f"[자동물류] 그리퍼 열기(놓기) … (정착 {settle:.1f}s)")
+        if not self.robot.gripper_open(settle_s=settle):
             return False, f"[{idx}] 그리퍼 열기 실패"
+        print("[자동물류] 그리퍼 열기(놓기) 완료")
 
         self.root.after(
             0,
@@ -1387,7 +1434,9 @@ class OcrClickMoveApp:
                     self.robot.ensure_gripper_tcp()
 
                 def phase(p: str) -> None:
-                    if p == "rotate":
+                    if p == "j1":
+                        msg = "목표 X<0 — J1 선회전 중..."
+                    elif p == "rotate":
                         msg = "그리퍼 자세 조정 중..."
                     elif p == "move_xy":
                         msg = "목표 XY로 이동 중 (Z 유지)..."
@@ -1397,25 +1446,21 @@ class OcrClickMoveApp:
                         msg = "목표로 이동 중..."
                     self.root.after(0, lambda m=msg: self.status_var.set(m))
 
-                # 이동 전 그리퍼 열기 완료 → 그다음 자세/이동
+                # 이동만 수행 (XY→Z). 그리퍼 여닫기는 이동 완료 후 버튼으로.
                 self.root.after(
                     0,
-                    lambda: self.status_var.set("이동 전 그리퍼 열기 (완료 대기)..."),
+                    lambda: self.status_var.set("목표로 이동 중 (XY→Z)..."),
                 )
-                if not self.robot.gripper_open():
-                    print("[앱] 이동 전 그리퍼 열기 실패")
-                    ok = False
-                else:
-                    ok = self.robot.movel_gripper(
-                        target[:3],
-                        vel=[VEL_XY, VEL_ORI],
-                        acc=[ACC_XY, ACC_ORI],
-                        straighten_first=True,
-                        rotate_first=True,
-                        z_up_mm=0.0,
-                        ori_deg=target[3:6],
-                        phase_cb=phase,
-                    )
+                ok = self.robot.movel_gripper(
+                    target[:3],
+                    vel=[VEL_XY, VEL_ORI],
+                    acc=[ACC_XY, ACC_ORI],
+                    straighten_first=True,
+                    rotate_first=True,
+                    z_up_mm=0.0,
+                    ori_deg=target[3:6],
+                    phase_cb=phase,
+                )
                 if ok:
                     actual = self.robot.get_posx_mm_deg()
                     if actual is not None:
@@ -1424,6 +1469,13 @@ class OcrClickMoveApp:
                                 np.array(actual[:3]) - np.array(target[:3])
                             )
                         )
+                    print("[앱] 이동 완료 — 그리퍼 열기/닫기 가능")
+                    self.root.after(
+                        0,
+                        lambda: self.status_var.set(
+                            "도착 완료 — 그리퍼 열기/닫기 가능"
+                        ),
+                    )
             except Exception as exc:
                 print(f"[앱] movel 예외: {exc}")
                 ok = False
@@ -1814,7 +1866,7 @@ def main() -> None:
         robot_model=ROBOT_MODEL,
         ws=DOOSAN_WS,
     )
-    # 연결 시 TCP 설정 + 기본 조인트 자세(0,0,90,0,90,0) 교정 후 GUI 시작
+    # 연결 시 TCP 설정 + 기본 조인트 자세(0,0,60,0,120,0) 교정 후 GUI 시작
     robot_ok = robot.connect_and_set_autonomous(
         setup_gripper=True,
         straighten_down=True,

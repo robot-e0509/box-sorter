@@ -36,7 +36,7 @@ DR_MV_MOD_ABS = 0
 # Z는 실측 손가락 tip까지 거리로 조정하세요.
 # ---------------------------------------------------------------------------
 GRIPPER_TCP_NAME = "rh_p12_rn"
-GRIPPER_TCP_POS = [0.0, 0.0, 136.0, 0.0, 0.0, 0.0] #154 -> 152
+GRIPPER_TCP_POS = [0.0, 0.0, 134.0, 0.0, 0.0, 0.0] #154 -> 152
 # 감지된 표면 Z보다 tip을 이만큼 위로 (그리퍼 높이 감안, mm)
 # 기본값 = TCP Z(=그리퍼 길이). 더/덜 올리고 싶으면 여기만 조정.
 GRIPPER_HEIGHT_MM = float(GRIPPER_TCP_POS[2])
@@ -45,7 +45,7 @@ TARGET_Z_UP_MM = GRIPPER_HEIGHT_MM
 GRIPPER_DOWN_ORI_DEG = [0.0, 180.0, 0.0]
 ORI_TOL_DEG = 5.0
 # 기동 전 기본자세 (조인트 deg, J1..J6)
-HOME_POSJ_DEG = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+HOME_POSJ_DEG = [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
 HOME_POSJ_TOL_DEG = 2.0
 # Ry=180°(하향) ZYZ 특이점: [0,180,yaw] ≡ [-yaw,180,0]
 # → 항상 정규형 [yaw, 180, 0] 사용
@@ -64,6 +64,13 @@ GRIPPER_CURRENT_CUSTOM = 250
 GRIPPER_CMD_TIMEOUT_S = 20.0
 # 손가락 기구 정착 대기 (열기/닫기 서비스 응답 후, 이동 전)
 GRIPPER_SETTLE_S = 4.0
+# movel/movej 가 그리퍼 상주 DRL을 끊을 수 있어, 다음 그리퍼 명령 전 재기동 대기
+GRIPPER_DRL_RELAUNCH_S = 3.0
+# 목표 base X < 0 이면 movel 전에 J1을 목표 XY 방위로 선회전
+NEG_X_J1_PREPARE = True
+J1_PREPARE_TOL_DEG = 8.0
+J1_PREPARE_VEL = 25.0
+J1_PREPARE_ACC = 25.0
 
 
 def normalize_yaw_deg(yaw: float) -> float:
@@ -222,6 +229,7 @@ class DoosanClient:
     _cli_set_tcp: Any = field(default=None, repr=False)
     _cli_get_tcp: Any = field(default=None, repr=False)
     _cli_gripper: Any = field(default=None, repr=False)
+    _cli_drl_start: Any = field(default=None, repr=False)
     _rclpy: Any = field(default=None, repr=False)
     _executor: Any = field(default=None, repr=False)
     _spin_thread: Any = field(default=None, repr=False)
@@ -235,8 +243,11 @@ class DoosanClient:
     _SetCurrentTcp: Any = field(default=None, repr=False)
     _GetCurrentTcp: Any = field(default=None, repr=False)
     _GripperCmd: Any = field(default=None, repr=False)
+    _DrlStart: Any = field(default=None, repr=False)
     _lock: Any = field(default_factory=threading.Lock, repr=False)
     gripper_ready: bool = False
+    # movel/movej 이후 True → 다음 gripper_cmd 전 상주 DRL 재기동
+    _gripper_loop_stale: bool = False
     # 커스텀 닫기 stroke (0=완전닫힘 ~ 750=완전열림). 기본=반만 닫힘
     custom_close_pos: int = GRIPPER_POS_HALF
     custom_close_current: int = GRIPPER_CURRENT_CUSTOM
@@ -263,6 +274,7 @@ class DoosanClient:
             from rclpy.executors import MultiThreadedExecutor
             from dsr_msgs2.srv import (
                 ConfigCreateTcp,
+                DrlStart,
                 GetCurrentPosj,
                 GetCurrentPosx,
                 GetCurrentTcp,
@@ -293,6 +305,7 @@ class DoosanClient:
         self._ConfigCreateTcp = ConfigCreateTcp
         self._SetCurrentTcp = SetCurrentTcp
         self._GetCurrentTcp = GetCurrentTcp
+        self._DrlStart = DrlStart
 
         # 손가락 그리퍼 서비스 (dsr_gripper) — bringup과 별도 노드
         try:
@@ -406,7 +419,55 @@ class DoosanClient:
                     "       → ros2 run dsr_gripper gripper_service"
                 )
 
+        # 그리퍼 상주 DRL 재기동용 (팔 모션이 DRL을 끊는 경우 대비)
+        if self._DrlStart is not None:
+            drl_srv = f"/{self.robot_id}/dsr_controller2/drl/drl_start"
+            self._cli_drl_start = self.node.create_client(self._DrlStart, drl_srv)
+            if self._cli_drl_start.wait_for_service(timeout_sec=1.0):
+                print(f"[로봇] DrlStart 발견: {drl_srv}")
+            else:
+                print(f"[로봇] DrlStart 대기 중: {drl_srv}")
+
         self.connected = True
+        return True
+
+    def _mark_gripper_loop_stale(self) -> None:
+        """팔 모션 후 그리퍼 상주 DRL이 끊겼을 수 있음 → 다음 명령 전 재기동."""
+        self._gripper_loop_stale = True
+
+    def _ensure_gripper_resident_loop(self) -> bool:
+        """
+        gripper_service 상주 DRL과 동일한 루프를 DrlStart로 다시 띄운다.
+        movel/movej 직후 custom_close 가 '성공'만 찍히고 안 움직이는 현상 방지.
+        """
+        if not self._gripper_loop_stale:
+            return True
+        if self._cli_drl_start is None or self._DrlStart is None:
+            print(
+                "[로봇] 그리퍼 DRL 재기동 생략 "
+                "(DrlStart 클라이언트 없음 — gripper_service가 루프를 갖고 있다고 가정)"
+            )
+            self._gripper_loop_stale = False
+            return True
+        try:
+            from dsr_gripper.gripper_service import build_loop_drl
+        except ImportError as exc:
+            print(f"[로봇] build_loop_drl import 실패: {exc}")
+            self._gripper_loop_stale = False
+            return True
+        if not self._cli_drl_start.wait_for_service(timeout_sec=3.0):
+            print("[로봇] drl_start 서비스 없음 — 그리퍼 루프 재기동 실패")
+            return False
+        req = self._DrlStart.Request()
+        req.robot_system = 0
+        req.code = build_loop_drl(1, 57600)
+        # 무한 루프라 응답을 기다리지 않음 (gripper_service 와 동일)
+        self._cli_drl_start.call_async(req)
+        wait = float(GRIPPER_DRL_RELAUNCH_S)
+        print(f"[로봇] 그리퍼 상주 DRL 재기동 중… ({wait:.1f}s)")
+        time.sleep(wait)
+        self._gripper_loop_stale = False
+        print("[로봇] 그리퍼 상주 DRL 재기동 완료")
         return True
 
     def gripper_service_ready(self, timeout_s: float = 0.5) -> bool:
@@ -438,6 +499,9 @@ class DoosanClient:
                     self.robot_id
                 )
             )
+            return False
+        # 팔 이동 직후면 상주 DRL이 죽어서 레지스터만 쓰이고 손가락은 안 움직임
+        if not self._ensure_gripper_resident_loop():
             return False
         pos = int(max(0, min(750, int(position))))
         cur = int(max(0, int(current)))
@@ -797,18 +861,58 @@ class DoosanClient:
     ) -> bool:
         """
         기동/복귀용 기본 조인트 자세로 movej.
-        HOME_POSJ_DEG = [0, 0, 90, 0, 90, 0] (J1..J6, deg).
+        HOME_POSJ_DEG = [0, 0, 60, 0, 120, 0] (J1..J6, deg).
+
+        순서:
+          1) J2~J6 만 기본값으로 (J1은 현재값 유지)
+          2) 그다음 J1 을 기본값으로
         이미 기본자세면 True (이동 생략).
         """
         home = [float(v) for v in HOME_POSJ_DEG]
         if not force and self.is_at_home_posj():
             print("[로봇] 이미 기본 조인트 자세")
             return True
-        print(
-            "[로봇] 기본자세 교정 → "
-            + ", ".join(f"J{i+1}={home[i]:.1f}" for i in range(6))
+
+        cur = self.get_posj_deg()
+        if cur is None or len(cur) < 6:
+            print("[로봇] 기본자세: posj 읽기 실패 — 6축 일괄 movej")
+            print(
+                "[로봇] 기본자세 교정 → "
+                + ", ".join(f"J{i+1}={home[i]:.1f}" for i in range(6))
+            )
+            return self.movej(home, vel=vel, acc=acc)
+
+        tol = float(HOME_POSJ_TOL_DEG)
+        j1_cur = float(cur[0])
+        need_j26 = any(
+            self._angle_diff_deg(float(cur[i]), home[i]) > tol for i in range(1, 6)
         )
-        return self.movej(home, vel=vel, acc=acc)
+        need_j1 = self._angle_diff_deg(j1_cur, home[0]) > tol
+
+        if need_j26:
+            stage1 = [j1_cur, home[1], home[2], home[3], home[4], home[5]]
+            print(
+                "[로봇] 기본자세 ① J2~J6 교정 (J1 유지) → "
+                + ", ".join(f"J{i+1}={stage1[i]:.1f}" for i in range(6))
+            )
+            if not self.movej(stage1, vel=vel, acc=acc):
+                print("[로봇] 기본자세 ① J2~J6 실패")
+                return False
+        else:
+            print("[로봇] 기본자세 ① J2~J6 이미 일치 — 생략")
+
+        if need_j1 or force:
+            print(
+                "[로봇] 기본자세 ② J1 교정 → "
+                + ", ".join(f"J{i+1}={home[i]:.1f}" for i in range(6))
+            )
+            if not self.movej(home, vel=vel, acc=acc):
+                print("[로봇] 기본자세 ② J1 실패")
+                return False
+        else:
+            print("[로봇] 기본자세 ② J1 이미 일치 — 생략")
+
+        return True
 
     def orient_gripper_down(
         self,
@@ -820,6 +924,40 @@ class DoosanClient:
         return self.rotate_gripper_to(
             list(GRIPPER_DOWN_ORI_DEG), vel=vel, acc=acc, force=force
         )
+
+    def prepare_j1_toward_xy(
+        self,
+        x_mm: float,
+        y_mm: float,
+        *,
+        vel: float = J1_PREPARE_VEL,
+        acc: float = J1_PREPARE_ACC,
+        tol_deg: float = J1_PREPARE_TOL_DEG,
+    ) -> bool:
+        """
+        목표 base XY 방위로 J1만 선회전 (J2..J6 유지).
+        e0509: J1=0 ≈ base +X, J1 ≈ atan2(y,x).
+        """
+        j1_tgt = normalize_yaw_deg(
+            math.degrees(math.atan2(float(y_mm), float(x_mm)))
+        )
+        curj = self.get_posj_deg()
+        if curj is None or len(curj) < 6:
+            print("[로봇] J1 선회전: posj 읽기 실패")
+            return False
+        if self._angle_diff_deg(float(curj[0]), j1_tgt) <= float(tol_deg):
+            print(
+                f"[로봇] J1 이미 목표 방위 "
+                f"(J1={curj[0]:.1f}° ≈ {j1_tgt:.1f}°) — 생략"
+            )
+            return True
+        posj = [j1_tgt] + [float(v) for v in curj[1:6]]
+        print(
+            f"[로봇] 목표 X<0 — J1 선회전 "
+            f"{curj[0]:.1f}° → {j1_tgt:.1f}° "
+            f"(목표 XY=({float(x_mm):.0f},{float(y_mm):.0f}))"
+        )
+        return self.movej(posj, vel=float(vel), acc=float(acc))
 
     def movel_gripper(
         self,
@@ -833,11 +971,13 @@ class DoosanClient:
         yaw_deg: Optional[float] = None,
         rotate_first: bool = True,
         phase_cb: Optional[Any] = None,
+        j1_prepare: Optional[bool] = None,
     ) -> bool:
         """
         그리퍼 tip + 목표 자세로 이동.
-        순서 (rotate_first=True):
-          1) 자세가 다르면 현재 위치에서 그리퍼만 조정 (완료 대기)
+        순서:
+          0) 목표 X<0 이면 J1을 목표 XY 방위로 선회전
+          1) 자세가 다르면 현재 위치에서 그리퍼만 조정
           2) 현재 Z 유지한 채 목표 XY로 이동
           3) 목표 Z로 하강/상승
         """
@@ -865,6 +1005,13 @@ class DoosanClient:
             except Exception:
                 pass
 
+        do_j1 = bool(NEG_X_J1_PREPARE if j1_prepare is None else j1_prepare)
+        if do_j1 and tx < 0.0:
+            _phase("j1")
+            if not self.prepare_j1_toward_xy(tx, ty):
+                print("[로봇] movel_gripper: J1 선회전 실패")
+                return False
+
         cur = self.get_posx_mm_deg()
         do_rotate = bool(rotate_first or straighten_first)
         if do_rotate:
@@ -873,50 +1020,60 @@ class DoosanClient:
                 need = not self.ori_close(cur[3:6], ori)
             if need:
                 _phase("rotate")
-                print("[로봇] 1/3 그리퍼 자세 조정 → 이후 XY → Z")
+                print("[로봇] 그리퍼 자세 조정 → 이후 XY → Z")
                 if not self.rotate_gripper_to(ori, vel=vel, acc=acc):
                     print("[로봇] movel_gripper: 그리퍼 자세 조정 실패")
                     return False
                 cur = self.get_posx_mm_deg()
             else:
-                print("[로봇] 1/3 그리퍼 자세 이미 일치 — 바로 XY 이동")
+                print("[로봇] 그리퍼 자세 이미 일치 — 바로 XY 이동")
 
         print(
             f"[로봇] Z 보정: surface={float(xyz_mm[2]):.1f} + lift={lift:.1f} "
             f"→ tip_Z={z_cmd:.1f} mm"
         )
 
-        # 현재 Z를 유지한 채 목표 XY로 먼저 이동 (pose 없으면 XY·Z 한 번에)
+        # 항상 XY 먼저 (현재 Z 유지) → 그다음 목표 Z. 동시 XYZ 이동 안 함.
+        if cur is None or len(cur) < 3:
+            cur = self.get_posx_mm_deg()
         if cur is not None and len(cur) >= 3:
             z_hold = float(cur[2])
-            xy_delta = math.hypot(tx - float(cur[0]), ty - float(cur[1]))
-            if xy_delta > 1.0:
-                target_xy = [tx, ty, z_hold, ori[0], ori[1], ori[2]]
-                _phase("move_xy")
-                print(
-                    "[로봇] 2/3 목표 XY 이동 (Z 유지) → "
-                    f"[{target_xy[0]:.1f}, {target_xy[1]:.1f}, {target_xy[2]:.1f}]"
-                )
-                if not self.movel(target_xy, vel=vel, acc=acc):
-                    print("[로봇] movel_gripper: XY 이동 실패")
-                    return False
-            else:
-                print(f"[로봇] 2/3 XY 이미 근접 (Δ={xy_delta:.1f}mm) — Z만 이동")
         else:
-            print("[로봇] 현재 pose 없음 — XY·Z를 한 번에 이동")
-            target = [tx, ty, z_cmd, ori[0], ori[1], ori[2]]
-            _phase("move")
-            return self.movel(target, vel=vel, acc=acc)
+            # pose를 못 읽으면 목표 Z 위에서 XY 접근
+            z_hold = float(z_cmd) + 80.0
+            print(
+                f"[로봇] pose 없음 — XY 접근고도 Z={z_hold:.1f} "
+                f"(목표Z+80) 로 가정"
+            )
+
+        xy_delta = 0.0
+        if cur is not None and len(cur) >= 3:
+            xy_delta = math.hypot(tx - float(cur[0]), ty - float(cur[1]))
+        else:
+            xy_delta = 1e9  # pose 없으면 XY 이동 강제
+
+        if xy_delta > 1.0:
+            target_xy = [tx, ty, z_hold, ori[0], ori[1], ori[2]]
+            _phase("move_xy")
+            print(
+                "[로봇] ① 목표 XY 이동 (Z 유지) → "
+                f"[{target_xy[0]:.1f}, {target_xy[1]:.1f}, {target_xy[2]:.1f}]"
+            )
+            if not self.movel(target_xy, vel=vel, acc=acc):
+                print("[로봇] movel_gripper: XY 이동 실패")
+                return False
+        else:
+            print(f"[로봇] ① XY 이미 근접 (Δ={xy_delta:.1f}mm) — Z만 이동")
 
         target_z = [tx, ty, z_cmd, ori[0], ori[1], ori[2]]
         z_delta = abs(z_cmd - z_hold)
         if z_delta <= 1.0:
-            print(f"[로봇] 3/3 Z 이미 근접 (Δ={z_delta:.1f}mm) — 완료")
+            print(f"[로봇] ② Z 이미 근접 (Δ={z_delta:.1f}mm) — 이동 완료")
             return True
 
         _phase("move_z")
         print(
-            "[로봇] 3/3 목표 Z 이동 → "
+            "[로봇] ② 목표 Z 이동 → "
             f"[{target_z[0]:.1f}, {target_z[1]:.1f}, {target_z[2]:.1f}]"
         )
         return self.movel(target_z, vel=vel, acc=acc)
@@ -1011,6 +1168,7 @@ class DoosanClient:
             print("[로봇] movej 거부됨 (success=False)")
             return False
         print("[로봇] movej 완료 (success=True)")
+        self._mark_gripper_loop_stale()
         return True
 
     def movel(
@@ -1069,6 +1227,7 @@ class DoosanClient:
             print("       원인 후보: 도달 불가 좌표, 충돌/세이프티, Manual 키, Servo Off")
             return False
         print("[로봇] movel 완료 (success=True)")
+        self._mark_gripper_loop_stale()
         return True
 
     def close(self) -> None:
