@@ -31,7 +31,7 @@ import numpy as np
 # 설정
 # ---------------------------------------------------------------------------
 LANGS = ["ko", "en"]
-MIN_CONF = 0.20          # EasyOCR 후보 하한 default 0.35
+MIN_CONF = 0.15          # EasyOCR 후보 하한 default 0.35
 MIN_KEEP_CONF = 0.30     # 최종 채택 conf (이하면 글자 없음으로 버림) default 0.5
 USE_GPU = True
 WINDOW_NAME = "EasyOCR Contour"
