@@ -1,0 +1,21 @@
+{
+  "measured_at": "2026-07-15",
+  "question": "물병(30mm)으로 구한 계수가 상자(75mm)에도 통하는가?",
+  "answer": "아니오. 폭이 절편뿐 아니라 '기울기'까지 바꿉니다.",
+  "cross_validation": {
+    "note": "물병 계수로 상자(320g, tau -8.533)를 예측",
+    "predicted_g": 233,
+    "actual_g": 320,
+    "error_g": -87
+  },
+  "slope_comparison": {
+    "bottle_30mm_g_per_Nm": 214.2,
+    "box_75mm_g_per_Nm": 163.6,
+    "difference_pct": 24
+  },
+  "conclusion": [
+    "폭이 다르면 계수를 새로 구해야 합니다.",
+    "우리 상자 폭이 전부 비슷하면(±10mm) 계수 하나로 충분합니다.",
+    "폭이 다양하면 OCR 팀에게 width_mm 을 받아 폭별로 보정해야 합니다."
+  ]
+}
