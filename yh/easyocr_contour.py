@@ -31,8 +31,8 @@ import numpy as np
 # 설정
 # ---------------------------------------------------------------------------
 LANGS = ["ko", "en"]
-MIN_CONF = 0.30          # EasyOCR 후보 하한 default 0.35
-MIN_KEEP_CONF = 0.35     # 최종 채택 conf (이하면 글자 없음으로 버림) default 0.5
+MIN_CONF = 0.20          # EasyOCR 후보 하한 default 0.35
+MIN_KEEP_CONF = 0.30     # 최종 채택 conf (이하면 글자 없음으로 버림) default 0.5
 USE_GPU = True
 WINDOW_NAME = "EasyOCR Contour"
 SAVE_DIR = Path(__file__).resolve().parent / "ocr_out"
@@ -56,15 +56,15 @@ LABEL_MIN_MEAN = 140   # 흰 라벨로 볼 최소 평균 밝기
 
 # 글자 인식 후: cam2base base-Z 같은 높이대 (mm) — median ± 허용치
 SAME_HEIGHT_TOL_MM = 40.0
-# deskew 후 OCR에 추가 시험할 회전각 (도)
-OCR_EXTRA_ANGLES_DEG = (0, 45, 90, 135, 180, 225, 270, 315)
+# deskew 후 OCR에 추가 시험할 회전각 (도, 15° 단위 0~345)
+OCR_EXTRA_ANGLES_DEG = tuple(range(0, 360, 15))
 DEPTH_SAMPLE_R = 3
 # 같은 물체로 볼 중심 거리 (작을수록 더 많이 분리 유지)
 DUP_CENTER_PX = 20
 # IoU 이하면 서로 다른 객체로 유지
 DUP_IOU_MAX = 0.35
 # 최종 외곽: 겹치거나 거의 붙어 있으면 하나로 합침
-MERGE_NEAR_GAP_PX = 22          # AABB 간격(px) 이하 → 합침
+MERGE_NEAR_GAP_PX = 20          # AABB 간격(px) 이하 → 합침
 MERGE_NEAR_IOU = 0.02           # IoU 이상 → 합침
 MAX_SIDE_PX_MERGED = 400        # 합친 외곽 허용 한도
 
@@ -978,7 +978,7 @@ def ocr_patch_multirot(
     """
     deskew 이후 여러 각도에서 OCR.
     - minAreaRect deskew가 이미 임의 기울기를 맞춤
-    - 여기서는 글자 '위쪽' 방향을 45도 간격으로 시험
+    - 여기서는 글자 '위쪽' 방향을 15도 간격으로 시험
     """
     if patch_bgr is None or patch_bgr.size == 0:
         return [], 0
